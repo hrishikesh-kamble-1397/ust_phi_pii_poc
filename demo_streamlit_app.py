@@ -9,29 +9,17 @@ st.title("📄 PDF Chatbot on Snowflake")
 
 # Sidebar controls
 st.sidebar.header("Settings")
-model = st.sidebar.selectbox(
-    "LLM model",
-    options=[
-        # Keep the one(s) that exist in your account; adjust if needed
-        "mistral-large",
-        "llama3.1-70b",
-        "mixtral-8x7b"
-    ],
-    index=0
-)
-top_k = st.sidebar.slider("Top‑K chunks", min_value=1, max_value=10, value=5, step=1)
-
-show_sources = st.sidebar.checkbox("Show sources", value=True)
+model = st.sidebar.selectbox("LLM model", ["llama3.1-70b", "mistral-large", "mixtral-8x7b"], index=0)
+top_k = st.sidebar.slider("Top‑K chunks", 1, 12, 5, 1)
+show_sources = st.sidebar.checkbox("Show retrieved sources", value=True)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("PII/PHI Extractor (Optional)")
-default_stage_file = "sample_hospitalization_claim1.pdf"
+st.sidebar.subheader("PII/PHI Stored Procedure")
 stage_file_name = st.sidebar.text_input(
-    "Stage file name (on @AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1)",
-    value=default_stage_file,
-    help="The file must already be uploaded to the specified stage."
+    "Stage file name (must exist on your PDF stage)",
+    value="sample_hospitalization_claim1.pdf",
 )
-run_proc = st.sidebar.button("Run PII/PHI Parse & Classify")
+run_proc_btn = st.sidebar.button("Run PII/PHI Parse & Classify")
 
 # Helpers
 def call_search(query: str, k: int) -> pd.DataFrame:
