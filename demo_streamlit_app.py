@@ -44,20 +44,10 @@ run_proc = st.sidebar.button("Run PII/PHI Parse & Classify")
 # Helpers
 # -----------------------------------------------------------------------------
 def call_search(query: str, k: int) -> pd.DataFrame:
-    """
-    Calls Snowflake Cortex Search to fetch top-k chunks.
-    """
     search_sql = """
-        SELECT
-          CHUNK_TEXT,
-          SOURCE_FILE,
-          SCORE
+        SELECT CHUNK_TEXT, SOURCE_FILE, SCORE
         FROM TABLE(
-          SNOWFLAKE.CORTEX.SEARCH(
-            SERVICE => 'pdf_search_svc',
-            QUERY   => ?,
-            TOP_K   => ?
-          )
+            AI_POC_DB.PII_PHI_POC.PDF_SEARCH_SVC_SEARCH(?, ?)
         )
         ORDER BY SCORE DESC
     """
