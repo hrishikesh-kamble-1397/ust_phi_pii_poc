@@ -47,19 +47,21 @@ def call_search(query: str, k: int) -> pd.DataFrame:
     """
     Calls Snowflake Cortex Search to fetch top-k chunks.
     """
-    search_sql = f"""
+    search_sql = """
         SELECT
           CHUNK_TEXT,
           SOURCE_FILE,
           SCORE
-        FROM SNOWFLAKE.CORTEX.SEARCH(
-          SERVICE => 'pdf_search_svc',
-          QUERY   => ?,
-          TOP_K   => {k}
+        FROM TABLE(
+          SNOWFLAKE.CORTEX.SEARCH(
+            SERVICE => 'pdf_search_svc',
+            QUERY   => ?,
+            TOP_K   => ?
+          )
         )
         ORDER BY SCORE DESC
     """
-    return session.sql(search_sql, params=[query]).to_pandas()
+    return session.sql(search_sql, params=[query, k]).to_pandas()
 
 def call_llm(model_name: str, prompt: str) -> str:
     """
@@ -90,7 +92,6 @@ def call_pii_phi_proc(file_name: str) -> str:
     """
     sql = "CALL AI_POC_DB.PII_PHI_POC.SP_PARSE_EXTRACT_CLASSIFY(?)"
     row = session.sql(sql, params=[file_name]).collect()[0]
-    # In Snowflake, Proc return is in first column
     return list(row.asDict().values())[0]
 
 def load_output_table(file_name: str) -> pd.DataFrame:
