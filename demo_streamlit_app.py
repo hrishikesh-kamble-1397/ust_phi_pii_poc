@@ -54,7 +54,7 @@ def call_search(query: str, k: int) -> pd.DataFrame:
           SCORE
         FROM SNOWFLAKE.CORTEX.SEARCH(
           SERVICE => 'pdf_search_svc',
-          QUERY   => %s,
+          QUERY   => ?,
           TOP_K   => {k}
         )
         ORDER BY SCORE DESC
@@ -66,7 +66,7 @@ def call_llm(model_name: str, prompt: str) -> str:
     Calls Snowflake Cortex COMPLETE to generate the answer.
     """
     llm_sql = """
-        SELECT SNOWFLAKE.CORTEX.COMPLETE(%s, %s) AS ANSWER
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER
     """
     row = session.sql(llm_sql, params=[model_name, prompt]).collect()[0]
     return row["ANSWER"]
@@ -88,7 +88,7 @@ def call_pii_phi_proc(file_name: str) -> str:
     """
     Calls your stored procedure and returns the procedure's message.
     """
-    sql = "CALL AI_POC_DB.PII_PHI_POC.SP_PARSE_EXTRACT_CLASSIFY(%s)"
+    sql = "CALL AI_POC_DB.PII_PHI_POC.SP_PARSE_EXTRACT_CLASSIFY(?)"
     row = session.sql(sql, params=[file_name]).collect()[0]
     # In Snowflake, Proc return is in first column
     return list(row.asDict().values())[0]
