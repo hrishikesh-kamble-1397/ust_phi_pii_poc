@@ -7,8 +7,8 @@ from snowflake.snowpark.context import get_active_session
 # -----------------------------------------------------------------------------
 # App config
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="PDF Chatbot (RBAC-aware)", page_icon="📄", layout="wide")
-st.title("📄 PDF Chatbot on Snowflake — RBAC‑aware PII/PHI Controls")
+st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
+st.title("📄 PDF Chatbot on Snowflake")
 
 # Obtain active Snowflake session (works in Snowsight / Snowflake-hosted Streamlit)
 session = get_active_session()
@@ -33,18 +33,10 @@ top_k = st.sidebar.slider("Top‑K chunks", min_value=1, max_value=10, value=5, 
 show_sources = st.sidebar.checkbox("Show sources", value=True)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Search Service")
-search_service = st.sidebar.text_input(
-    "Cortex Search service name",
-    value="pdf_search_svc_secure",
-    help="This service should be built on a SECURE VIEW that applies masking policies."
-)
-
-st.sidebar.markdown("---")
 st.sidebar.subheader("PII/PHI Extractor (Optional)")
 default_stage_file = "sample_hospitalization_claim1.pdf"
 stage_file_name = st.sidebar.text_input(
-    "Stage file name (on @AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1)",
+    "Stage file name (file must be uploaded in the stage)",
     value=default_stage_file,
     help="The file must already be uploaded to the specified stage."
 )
