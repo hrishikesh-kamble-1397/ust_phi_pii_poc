@@ -39,17 +39,14 @@ def call_search(query: str, k: int) -> pd.DataFrame:
     Calls Snowflake Cortex Search to fetch top-k chunks.
     """
     search_sql = f"""
-        SELECT
-          CHUNK_TEXT,
-          SOURCE_FILE,
-          SCORE
-        FROM SNOWFLAKE.CORTEX.SEARCH(
-          SERVICE => 'pdf_search_svc',
-          QUERY   => %s,
-          TOP_K   => {k}
-        )
-        ORDER BY SCORE DESC
-    """
+                    SELECT CHUNK_TEXT, SOURCE_FILE, SCORE
+                    FROM SNOWFLAKE.CORTEX.SEARCH(
+                    SERVICE => 'pdf_search_svc',
+                    QUERY   => %s,
+                    TOP_K   => {k}
+                    )
+                    ORDER BY SCORE DESC;
+                """
     return session.sql(search_sql, params=[query]).to_pandas()
 
 def call_llm(model_name: str, prompt: str) -> str:
