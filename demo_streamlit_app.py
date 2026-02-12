@@ -43,18 +43,20 @@ run_proc = st.sidebar.button("Run PII/PHI Parse & Classify")
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
-def call_search(query: str, k: int) -> pd.DataFrame:
+def call_search(query: str, k: int, serivce: str) -> pd.DataFrame:
     search_sql = """
-        SELECT CHUNK_TEXT, SOURCE_FILE, SCORE
-        FROM TABLE(
-            AI_POC_DB.PII_PHI_POC.PDF_SEARCH_SVC(
-                QUERY => ?,
-                LIMIT => ?
-            )
+       SELECT
+          CHUNK_TEXT,
+          SOURCE_FILE,
+          SCORE
+        FROM SNOWFLAKE.CORTEX.SEARCH(
+          SERVICE => ?,
+          QUERY   => ?,
+          TOP_K   => ?
         )
         ORDER BY SCORE DESC
     """
-    return session.sql(search_sql, params=[query, k]).to_pandas()
+    return session.sql(search_sql, params=[service, query, k]).to_pandas()
 
 def call_llm(model_name: str, prompt: str) -> str:
     """
