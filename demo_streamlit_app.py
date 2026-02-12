@@ -43,7 +43,7 @@ run_proc = st.sidebar.button("Run PII/PHI Parse & Classify")
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
-def call_search(query: str, k: int, serivce: str) -> pd.DataFrame:
+def call_search(query: str, k: int, service: str) -> pd.DataFrame:
     search_sql = """
        SELECT
           CHUNK_TEXT,
