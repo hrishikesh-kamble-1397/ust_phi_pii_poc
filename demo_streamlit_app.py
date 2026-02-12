@@ -47,7 +47,10 @@ def call_search(query: str, k: int) -> pd.DataFrame:
     search_sql = """
         SELECT CHUNK_TEXT, SOURCE_FILE, SCORE
         FROM TABLE(
-            AI_POC_DB.PII_PHI_POC.PDF_SEARCH_SVC_SEARCH(?, ?)
+            AI_POC_DB.PII_PHI_POC.PDF_SEARCH_SVC(
+                QUERY => ?,
+                LIMIT => ?
+            )
         )
         ORDER BY SCORE DESC
     """
