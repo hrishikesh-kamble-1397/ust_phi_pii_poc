@@ -50,13 +50,13 @@ def call_search(query: str, k: int, service: str) -> pd.DataFrame:
           SOURCE_FILE,
           SCORE
         FROM SNOWFLAKE.CORTEX.SEARCH(
-          SERVICE => ?,
+          SERVICE => 'pdf_search_svc',
           QUERY   => ?,
           TOP_K   => ?
         )
         ORDER BY SCORE DESC
     """
-    return session.sql(search_sql, params=[service, query, k]).to_pandas()
+    return session.sql(search_sql, params=[query, k]).to_pandas()
 
 def call_llm(model_name: str, prompt: str) -> str:
     """
