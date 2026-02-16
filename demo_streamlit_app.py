@@ -15,24 +15,18 @@ session = get_active_session()
 # -----------------------------------------------------------------------------
 # Sidebar controls
 # -----------------------------------------------------------------------------
-st.sidebar.header("Login 🔐")
-
-if not st.session_state.authenticated:
- 
-    username = st.sidebar.text_input("Username")
-    password = st.sidebar.text_input("Password", type="password")
-    login_btn = st.sidebar.button("Login")
-    
-    if login_btn:
-        #  DEMO AUTH (replace with DB / LDAP if needed)
-        if username and password:
-            st.session_state.authenticated = True
-            st.session_state.username = username
-        else:
-            st.sidebar.error("Invalid credentials")
- 
-    # Stop app execution until login
-    st.stop()
+st.sidebar.header("Settings")
+model = st.sidebar.selectbox(
+    "LLM model",
+    options=[
+        # Keep the one(s) that exist in your account; adjust if needed
+        "mistral-large",
+        "llama3.1-70b",
+        "mixtral-8x7b"
+    ],
+    index=0
+)
+top_k = st.sidebar.slider("Top‑K chunks", min_value=1, max_value=10, value=5, step=1)
 
 show_sources = st.sidebar.checkbox("Show sources", value=True)
 
