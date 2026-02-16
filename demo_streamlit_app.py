@@ -70,7 +70,7 @@ Answer:"""
                 llm_sql = """
                     SELECT SNOWFLAKE.CORTEX.COMPLETE(
                       'mistral-large',
-                      %s
+                      ?
                     ) AS ANSWER;
                 """
                 answer_row = session.sql(llm_sql, params=[full_prompt]).collect()[0]
