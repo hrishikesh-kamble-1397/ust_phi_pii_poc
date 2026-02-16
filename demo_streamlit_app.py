@@ -11,6 +11,7 @@ st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
 # -------------------------------------------------
 # SAFE Session State Initialization (VERY IMPORTANT)
 # -------------------------------------------------
+'''
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
@@ -93,7 +94,7 @@ else:
 if st.sidebar.button("🚪 Logout"):
     st.session_state.clear()
     #st.experimental_rerun()
-
+'''
 st.title("📄 PDF Chatbot on Snowflake")
 # -----------------------------------------------------------------------------
 # Sidebar controls
