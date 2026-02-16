@@ -7,7 +7,6 @@ from snowflake.snowpark.context import get_active_session
 # App config
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
-st.title("📄 PDF Chatbot on Snowflake")
 
 # -------------------------------------------------
 # SAFE Session State Initialization (VERY IMPORTANT)
@@ -49,8 +48,8 @@ def get_app_role(user_name):
 # -------------------------------------------------
 if not st.session_state["authenticated"]:
 
-    st.title("🔐 Policy Search Login")
-    st.caption("Authenticate to access Policy & Control Search")
+    st.title("🔐 Chatbot User Login")
+    st.caption("Authenticate to access PDF Chatbot")
 
     with st.form("login_form"):
         login_user = st.text_input(
@@ -95,6 +94,7 @@ if st.sidebar.button("🚪 Logout"):
     st.session_state.clear()
     #st.experimental_rerun()
 
+st.title("📄 PDF Chatbot on Snowflake")
 # -----------------------------------------------------------------------------
 # Sidebar controls
 # -----------------------------------------------------------------------------
