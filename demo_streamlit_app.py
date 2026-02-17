@@ -20,7 +20,7 @@ if "username" not in st.session_state:
 
 if "app_role" not in st.session_state:
     st.session_state["app_role"] = None
-
+'''
 
 # Obtain active Snowflake session (works in Snowsight / Snowflake-hosted Streamlit)
 session = get_active_session()
@@ -28,6 +28,7 @@ session = get_active_session()
 # -------------------------------------------------
 # Helper: Fetch App Role
 # -------------------------------------------------
+'''
 def get_app_role(user_name):
     df = session.sql("""
         SELECT APP_ROLE
@@ -43,10 +44,11 @@ def get_app_role(user_name):
         return None
 
     return df.iloc[0]["APP_ROLE"]
-
+'''
 # -------------------------------------------------
 # LOGIN SCREEN (Shown first)
 # -------------------------------------------------
+'''
 if not st.session_state["authenticated"]:
 
     st.title("🔐 Chatbot User Login")
@@ -79,10 +81,11 @@ if not st.session_state["authenticated"]:
         #st.experimental_rerun()
 
     st.stop()
-
+'''
 # -------------------------------------------------
 # Sidebar – User Info
 # -------------------------------------------------
+'''
 st.sidebar.success("Authenticated")
 st.sidebar.write("👤 User:", current_user)
 
@@ -132,16 +135,20 @@ def call_search(query: str, k: int) -> pd.DataFrame:
     Calls Snowflake Cortex Search to fetch top-k chunks.
     """
     search_sql = f"""
-        SELECT
-          CHUNK_TEXT,
-          SOURCE_FILE,
-          SCORE
-        FROM SNOWFLAKE.CORTEX.SEARCH(
-          SERVICE => 'pdf_search_svc',
-          QUERY   => ?,
-          TOP_K   => {k}
+         WITH query_vec AS (
+            SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_768(
+                'snowflake-arctic-embed-m',
+                ?
+            ) AS emb
         )
+        SELECT
+            c.CHUNK_TEXT,
+            c.SOURCE_FILE,
+            VECTOR_COSINE_SIMILARITY(c.EMBEDDING, q.emb) AS SCORE
+        FROM PDF_CHUNKS c
+        CROSS JOIN query_vec q
         ORDER BY SCORE DESC
+        LIMIT {k}
     """
     return session.sql(search_sql, params=[query]).to_pandas()
 
