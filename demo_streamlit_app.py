@@ -134,7 +134,7 @@ def call_search(query: str, k: int) -> pd.DataFrame:
         LIMIT {k}
     """
 
-    return session.sql(search_sql, params=[query, k = 100]).to_pandas()
+    return session.sql(search_sql, params=[query, k == 100]).to_pandas()
 
 
 def call_llm(model_name: str, prompt: str) -> str:
