@@ -131,30 +131,7 @@ if st.session_state.app_role == "admin":
 # Admin-only PII/PHI Section
 # -----------------------------------------------------------------------------
 if st.session_state.app_role == "admin":
-
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("PII/PHI Extractor")
-
-    default_stage_file = "sample_hospitalization_claim1.pdf"
-
-    stage_file_name = st.sidebar.text_input(
-        "Stage file name",
-        value=default_stage_file
-    )
-
-    run_proc = st.sidebar.button("Run PII/PHI Parse & Classify")
-
-    if run_proc:
-        with st.spinner("Running PII/PHI procedure..."):
-            try:
-                sql = "CALL AI_POC_DB.PII_PHI_POC.SP_PARSE_EXTRACT_CLASSIFY(?)"
-                row = session.sql(sql, params=[stage_file_name]).collect()[0]
-                result_msg = list(row.asDict().values())[0]
-
-                st.sidebar.success(result_msg)
-
-            except Exception as e:
-                st.sidebar.error(f"Procedure failed: {e}")
+    
 
 # -----------------------------------------------------------------------------
 # Helper Functions
