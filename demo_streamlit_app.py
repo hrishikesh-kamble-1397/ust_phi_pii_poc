@@ -105,30 +105,7 @@ if st.sidebar.button("🚪 Logout"):
 # -----------------------------------------------------------------------------
 st.title("📄 PDF Chatbot on Snowflake")
 
-# -----------------------------------------------------------------------------
-# Sidebar Settings
-# -----------------------------------------------------------------------------
-'''
-st.sidebar.header("Settings")
 
-model = st.sidebar.selectbox(
-    "LLM model",
-    options=[
-        "mistral-large",
-        "llama3.1-70b",
-        "mixtral-8x7b"
-    ],
-    index=0
-)
-
-top_k = st.sidebar.slider("Top-K chunks", 1, 10, 5)
-'''
-# Only admin can toggle source visibility
-'''
-show_sources = False
-if st.session_state.app_role == "admin":
-    show_sources = st.sidebar.checkbox("Show sources", value=True)
-'''
 # -----------------------------------------------------------------------------
 # Admin-only PII/PHI Section
 # -----------------------------------------------------------------------------
