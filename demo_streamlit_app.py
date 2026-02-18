@@ -100,6 +100,7 @@ if st.sidebar.button("🚪 Logout"):
     st.session_state.clear()
     st.rerun()
 
+top_k = st.sidebar.slider("Top‑K chunks", min_value=1, max_value=10, value=5, step=1)
 # -----------------------------------------------------------------------------
 # Main App
 # -----------------------------------------------------------------------------
@@ -134,7 +135,7 @@ def call_search(query: str, k: int) -> pd.DataFrame:
         LIMIT {k}
     """
 
-    return session.sql(search_sql, params=[query, k == 100]).to_pandas()
+    return session.sql(search_sql, params=[query]).to_pandas()
 
 
 def call_llm(model_name: str, prompt: str) -> str:
