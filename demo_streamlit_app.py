@@ -213,7 +213,7 @@ Question: {prompt}
 Answer:
 """
 
-                    answer = call_llm(model, full_prompt)
+                    answer = call_llm("llama3.1-70b", full_prompt)
 
                     st.write(answer)
 
