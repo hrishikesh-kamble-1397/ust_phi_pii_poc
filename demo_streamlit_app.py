@@ -131,10 +131,10 @@ def call_search(query: str, k: int) -> pd.DataFrame:
         FROM DOCS_CHUNKS c
         CROSS JOIN query_vec q
         ORDER BY SCORE DESC
-        LIMIT 10
+        LIMIT {k}
     """
 
-    return session.sql(search_sql, params=[query]).to_pandas()
+    return session.sql(search_sql, params=[query, k = 100]).to_pandas()
 
 
 def call_llm(model_name: str, prompt: str) -> str:
