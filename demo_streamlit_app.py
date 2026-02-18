@@ -27,9 +27,9 @@ if "app_role" not in st.session_state:
     st.session_state.app_role = None
 
 # -----------------------------------------------------------------------------
-# Fetch App Role from DB
+# Authenticate User (Username + Password)
 # -----------------------------------------------------------------------------
-def get_app_role(user_name):
+def authenticate_user(user_name, password):
 
     df = session.sql("""
         SELECT APP_ROLE
@@ -38,8 +38,9 @@ def get_app_role(user_name):
             UPPER(USER_NAME) = UPPER(:1)
             OR UPPER(USER_NAME) = SPLIT(UPPER(:1), '@')[0]
         )
+        AND PASSWORD = :2
         AND IS_ACTIVE = TRUE
-    """, [user_name]).to_pandas()
+    """, [user_name, password]).to_pandas()
 
     if df.empty:
         return None
@@ -55,22 +56,29 @@ if not st.session_state.authenticated:
     st.caption("Authenticate to access PDF Chatbot")
 
     with st.form("login_form"):
+
         login_user = st.text_input(
             "Username",
-            placeholder="e.g. username or username@company.com"
+            placeholder="e.g. vedant"
         )
+
+        login_password = st.text_input(
+            "Password",
+            type="password"
+        )
+
         login_btn = st.form_submit_button("Login")
 
     if login_btn:
 
-        if not login_user.strip():
-            st.warning("Please enter your username.")
+        if not login_user.strip() or not login_password.strip():
+            st.warning("Please enter username and password.")
             st.stop()
 
-        role = get_app_role(login_user)
+        role = authenticate_user(login_user, login_password)
 
         if not role:
-            st.error("❌ You are not authorized to access this application.")
+            st.error("❌ Invalid username or password.")
             st.stop()
 
         st.session_state.authenticated = True
