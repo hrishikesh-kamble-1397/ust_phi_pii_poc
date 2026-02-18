@@ -100,12 +100,13 @@ if st.sidebar.button("🚪 Logout"):
     st.session_state.clear()
     st.rerun()
 
-top_k = st.sidebar.slider("Top‑K chunks", min_value=1, max_value=10, value=5, step=1)
 # -----------------------------------------------------------------------------
 # Main App
 # -----------------------------------------------------------------------------
 st.title("📄 PDF Chatbot on Snowflake")
-
+top_k = 10
+model = "llama3.1-70b"
+show_sources = False
 
 # -----------------------------------------------------------------------------
 # Admin-only PII/PHI Section
@@ -213,7 +214,7 @@ Question: {prompt}
 Answer:
 """
 
-                    answer = call_llm("llama3.1-70b", full_prompt)
+                    answer = call_llm(model, full_prompt)
 
                     st.write(answer)
 
