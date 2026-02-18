@@ -108,6 +108,7 @@ st.title("📄 PDF Chatbot on Snowflake")
 # -----------------------------------------------------------------------------
 # Sidebar Settings
 # -----------------------------------------------------------------------------
+'''
 st.sidebar.header("Settings")
 
 model = st.sidebar.selectbox(
@@ -121,16 +122,17 @@ model = st.sidebar.selectbox(
 )
 
 top_k = st.sidebar.slider("Top-K chunks", 1, 10, 5)
-
+'''
 # Only admin can toggle source visibility
+'''
 show_sources = False
 if st.session_state.app_role == "admin":
     show_sources = st.sidebar.checkbox("Show sources", value=True)
-
+'''
 # -----------------------------------------------------------------------------
 # Admin-only PII/PHI Section
 # -----------------------------------------------------------------------------
-if st.session_state.app_role == "admin":
+# if st.session_state.app_role == "admin":
     
 
 # -----------------------------------------------------------------------------
