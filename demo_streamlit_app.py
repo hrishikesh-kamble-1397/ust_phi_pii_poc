@@ -131,7 +131,7 @@ def call_search(query: str, k: int) -> pd.DataFrame:
         FROM DOCS_CHUNKS c
         CROSS JOIN query_vec q
         ORDER BY SCORE DESC
-        LIMIT {k}
+        LIMIT 10
     """
 
     return session.sql(search_sql, params=[query]).to_pandas()
