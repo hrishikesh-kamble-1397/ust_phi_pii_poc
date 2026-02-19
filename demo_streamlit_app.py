@@ -11,7 +11,6 @@ st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
 # Snowflake Session
 # -----------------------------------------------------------------------------
 session = get_active_session()
-
 STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
 
 # -----------------------------------------------------------------------------
@@ -32,7 +31,7 @@ if "messages" not in st.session_state:
     ]
 
 # -----------------------------------------------------------------------------
-# Authenticate User
+# Authentication
 # -----------------------------------------------------------------------------
 def authenticate_user(user_name, password):
 
@@ -70,7 +69,7 @@ def call_llm(model_name, prompt):
 def mask_answer_with_llm(answer_text):
 
     masking_prompt = f"""
-You are a healthcare privacy engine.
+You are a healthcare data privacy engine.
 
 Mask ALL PII and PHI in the text below.
 
@@ -89,7 +88,7 @@ Masked Output:
     return call_llm("llama3.1-70b", masking_prompt)
 
 # -----------------------------------------------------------------------------
-# Generate Presigned URL for Stage File
+# Generate Presigned URL
 # -----------------------------------------------------------------------------
 def get_presigned_url(file_name):
 
@@ -112,7 +111,7 @@ if not st.session_state.authenticated:
     st.title("🔐 Chatbot Login")
 
     with st.form("login_form"):
-        login_user = st.text_input("Username")
+        login_user = st.text_input("Username",placeholder="e.g. Vedant")
         login_password = st.text_input("Password", type="password")
         login_btn = st.form_submit_button("Login")
 
@@ -153,6 +152,7 @@ st.title("📄 PDF Chatbot on Snowflake")
 
 top_k = 10
 model = "llama3.1-70b"
+SIMILARITY_THRESHOLD = 0.65  # adjust if needed
 
 # -----------------------------------------------------------------------------
 # Vector Search
@@ -206,7 +206,11 @@ if prompt:
                 if chunks_df.empty:
                     answer = "No relevant content found in documents."
                     st.write(answer)
+
                 else:
+                    # -----------------------------
+                    # Generate Answer
+                    # -----------------------------
                     context_text = "\n\n---\n\n".join(
                         chunks_df["CHUNK_TEXT"].tolist()
                     )
@@ -227,7 +231,6 @@ Question:
 Answer:
 """
 
-                    # Generate answer
                     answer = call_llm(model, full_prompt)
 
                     # Mask for non-admin
@@ -236,17 +239,31 @@ Answer:
 
                     st.write(answer)
 
-                    # 🔥 ADMIN DOWNLOAD BUTTONS
+                    # -----------------------------
+                    # Admin: Show Most Relevant PDF
+                    # -----------------------------
                     if st.session_state.app_role in ["admin", "owner"]:
 
-                        st.markdown("### 📥 Relevant PDF Downloads")
+                        # Calculate average similarity per file
+                        file_scores = (
+                            chunks_df
+                            .groupby("SOURCE_FILE")["SCORE"]
+                            .mean()
+                            .reset_index()
+                            .sort_values("SCORE", ascending=False)
+                        )
 
-                        unique_files = chunks_df["SOURCE_FILE"].unique()
+                        best_file = file_scores.iloc[0]["SOURCE_FILE"]
+                        best_score = file_scores.iloc[0]["SCORE"]
 
-                        for file_name in unique_files:
-                            url = get_presigned_url(file_name)
+                        if best_score >= SIMILARITY_THRESHOLD:
+
+                            st.markdown("### 📥 Most Relevant PDF")
+
+                            url = get_presigned_url(best_file)
+
                             st.link_button(
-                                f"Download {file_name}",
+                                f"Download {best_file} (Score: {best_score:.3f})",
                                 url
                             )
 
