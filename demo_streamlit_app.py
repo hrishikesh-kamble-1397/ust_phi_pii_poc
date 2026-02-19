@@ -12,6 +12,8 @@ st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
 # -----------------------------------------------------------------------------
 session = get_active_session()
 
+STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
+
 # -----------------------------------------------------------------------------
 # Session State Initialization
 # -----------------------------------------------------------------------------
@@ -51,7 +53,7 @@ def authenticate_user(user_name, password):
     return df.iloc[0]["APP_ROLE"].lower()
 
 # -----------------------------------------------------------------------------
-# Generic LLM Call
+# LLM Call
 # -----------------------------------------------------------------------------
 def call_llm(model_name, prompt):
 
@@ -63,12 +65,12 @@ def call_llm(model_name, prompt):
     return row["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Mask Final Answer (Only For Non-Admin)
+# Mask Final Answer (Only for Non-Admin)
 # -----------------------------------------------------------------------------
 def mask_answer_with_llm(answer_text):
 
     masking_prompt = f"""
-You are a healthcare data privacy engine.
+You are a healthcare privacy engine.
 
 Mask ALL PII and PHI in the text below.
 
@@ -85,6 +87,22 @@ Masked Output:
 """
 
     return call_llm("llama3.1-70b", masking_prompt)
+
+# -----------------------------------------------------------------------------
+# Generate Presigned URL for Stage File
+# -----------------------------------------------------------------------------
+def get_presigned_url(file_name):
+
+    sql = f"""
+        SELECT GET_PRESIGNED_URL(
+            @{STAGE_NAME},
+            '{file_name}',
+            3600
+        ) AS URL
+    """
+
+    result = session.sql(sql).collect()
+    return result[0]["URL"]
 
 # -----------------------------------------------------------------------------
 # LOGIN SCREEN
@@ -113,7 +131,6 @@ if not st.session_state.authenticated:
         st.session_state.authenticated = True
         st.session_state.username = login_user
         st.session_state.app_role = role
-
         st.rerun()
 
     st.stop()
@@ -188,6 +205,7 @@ if prompt:
 
                 if chunks_df.empty:
                     answer = "No relevant content found in documents."
+                    st.write(answer)
                 else:
                     context_text = "\n\n---\n\n".join(
                         chunks_df["CHUNK_TEXT"].tolist()
@@ -209,14 +227,28 @@ Question:
 Answer:
 """
 
-                    # Step 1: Generate full answer
+                    # Generate answer
                     answer = call_llm(model, full_prompt)
 
-                    # Step 2: Mask answer if not admin
+                    # Mask for non-admin
                     if st.session_state.app_role not in ["admin", "owner"]:
                         answer = mask_answer_with_llm(answer)
 
-                st.write(answer)
+                    st.write(answer)
+
+                    # 🔥 ADMIN DOWNLOAD BUTTONS
+                    if st.session_state.app_role in ["admin", "owner"]:
+
+                        st.markdown("### 📥 Relevant PDF Downloads")
+
+                        unique_files = chunks_df["SOURCE_FILE"].unique()
+
+                        for file_name in unique_files:
+                            url = get_presigned_url(file_name)
+                            st.link_button(
+                                f"Download {file_name}",
+                                url
+                            )
 
                 st.session_state.messages.append(
                     {"role": "assistant", "content": answer}
