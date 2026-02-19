@@ -170,7 +170,7 @@ def call_search(query, k):
             c.CHUNK_TEXT,
             c.SOURCE_FILE,
             VECTOR_COSINE_SIMILARITY(c.EMBEDDING, q.emb) AS SCORE
-        FROM DOCS_CHUNKS c
+        FROM AI_POC_DB.PII_PHI_POC.DOCS_CHUNKS c
         CROSS JOIN query_vec q
         ORDER BY SCORE DESC
         LIMIT {k}
