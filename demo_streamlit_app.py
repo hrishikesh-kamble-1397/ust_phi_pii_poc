@@ -46,45 +46,36 @@ def authenticate_user(user_name, password):
     return df.iloc[0]["APP_ROLE"].lower()
 
 # -----------------------------------------------------------------------------
-# LLM Call (Generic)
+# Generic LLM Call
 # -----------------------------------------------------------------------------
 def call_llm(model_name: str, prompt: str) -> str:
 
-    llm_sql = """
+    sql = """
         SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER
     """
 
-    row = session.sql(llm_sql, params=[model_name, prompt]).collect()[0]
+    row = session.sql(sql, params=[model_name, prompt]).collect()[0]
     return row["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# LLM-Based PII/PHI Masking
+# Mask Final Answer Using LLM (NOT CHUNKS)
 # -----------------------------------------------------------------------------
-def mask_sensitive_data_with_llm(text: str) -> str:
-    """
-    Uses LLM to detect and mask PII/PHI.
-    """
+def mask_answer_with_llm(answer_text: str) -> str:
 
     masking_prompt = f"""
-You are a healthcare data privacy engine.
+You are a healthcare privacy engine.
 
-Your task:
-- Detect ALL PII and PHI in the text below.
-- Replace sensitive values with exactly "XXXXXX".
-- Keep the structure and formatting unchanged.
-- Do NOT remove non-sensitive content.
-- Do NOT explain anything.
-- Return only the masked text.
+Mask ALL PII and PHI in the text below.
 
-PII includes:
-Names, Aadhaar, PAN, phone numbers, emails, addresses, IDs, claim numbers.
-
-PHI includes:
-Medical record numbers, diagnoses tied to person, admission dates,
-discharge dates, prescriptions, lab values linked to identity.
+Rules:
+- Replace sensitive values with exactly "XXXXXX"
+- Keep the sentence readable
+- Do NOT remove non-sensitive info
+- Do NOT explain
+- Return only masked text
 
 Text:
-{text}
+{answer_text}
 
 Masked Output:
 """
@@ -141,7 +132,6 @@ st.title("📄 PDF Chatbot on Snowflake")
 
 top_k = 10
 model = "llama3.1-70b"
-show_sources = False
 
 # -----------------------------------------------------------------------------
 # Vector Search
@@ -197,34 +187,18 @@ if prompt := st.chat_input("Type your question about the PDFs"):
 
                 if chunks_df.empty:
                     answer = "No relevant content found in documents."
-                    st.write(answer)
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": answer}
-                    )
                 else:
-                    context_blocks = []
-
-                    for _, row in chunks_df.iterrows():
-
-                        txt = row["CHUNK_TEXT"]
-
-                        # Role-based logic
-                        if st.session_state.app_role not in ["admin", "owner"]:
-                            txt = mask_sensitive_data_with_llm(txt)
-
-                        context_blocks.append(
-                            f"File: {row['SOURCE_FILE']}\n"
-                            f"Score: {row['SCORE']:.4f}\n"
-                            f"Content:\n{txt}\n"
-                        )
-
-                    context_text = "\n\n---\n\n".join(context_blocks)
-
-                    system_prompt = (
-                        "Answer strictly using provided context. "
-                        "If answer not found, say you don't know. "
-                        "Do not hallucinate."
+                    context_text = "\n\n---\n\n".join(
+                        chunks_df["CHUNK_TEXT"].tolist()
                     )
+
+                    system_prompt = """
+You are a medical document assistant.
+
+Answer the question using ONLY the context below.
+Be precise.
+Do not hallucinate.
+"""
 
                     full_prompt = f"""
 {system_prompt}
@@ -232,28 +206,26 @@ if prompt := st.chat_input("Type your question about the PDFs"):
 Context:
 {context_text}
 
-Question: {prompt}
+Question:
+{prompt}
+
 Answer:
 """
 
+                    # 1️⃣ Generate FULL Answer using RAW data
                     answer = call_llm(model, full_prompt)
 
-                    st.write(answer)
+                    # 2️⃣ If NOT admin → Mask final answer
+                    if st.session_state.app_role not in ["admin", "owner"]:
+                        answer = mask_answer_with_llm(answer)
 
-                    if show_sources:
-                        with st.expander("Retrieved Sources"):
-                            st.dataframe(
-                                chunks_df[["SOURCE_FILE", "SCORE"]],
-                                use_container_width=True
-                            )
+                st.write(answer)
 
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": answer}
-                    )
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": answer}
+                )
 
             except Exception as e:
                 err_msg = f"Error: {e}"
                 st.error(err_msg)
                 st.session_state.messages.append(
-                    {"role": "assistant", "content": err_msg}
-                )
