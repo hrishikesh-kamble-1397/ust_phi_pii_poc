@@ -10,16 +10,8 @@ st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
 # -----------------------------------------------------------------------------
 # Snowflake Session
 # -----------------------------------------------------------------------------
-try:
-    session = get_active_session()
-except Exception as e:
-    st.error(f"Snowflake session error: {str(e)}")
-    st.stop()
-
-MODEL_NAME = "llama3.1-70b"
-EMBED_MODEL = "snowflake-arctic-embed-m"
-SIMILARITY_THRESHOLD = 0.70
-TOP_K = 5
+session = get_active_session()
+STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
 
 # -----------------------------------------------------------------------------
 # Session State Initialization
@@ -42,143 +34,74 @@ if "messages" not in st.session_state:
 # Authentication
 # -----------------------------------------------------------------------------
 def authenticate_user(user_name, password):
-    try:
-        df = session.sql("""
-            SELECT APP_ROLE
-            FROM AI_POC_DB.PII_PHI_POC.APP_USER_ACCESS
-            WHERE (
-                UPPER(USER_NAME) = UPPER(:1)
-                OR UPPER(USER_NAME) = SPLIT(UPPER(:1), '@')[0]
-            )
-            AND PASSWORD = :2
-            AND IS_ACTIVE = TRUE
-        """, [user_name, password]).to_pandas()
 
-        if df.empty:
-            return None
+    df = session.sql("""
+        SELECT APP_ROLE
+        FROM AI_POC_DB.PII_PHI_POC.APP_USER_ACCESS
+        WHERE (
+            UPPER(USER_NAME) = UPPER(:1)
+            OR UPPER(USER_NAME) = SPLIT(UPPER(:1), '@')[0]
+        )
+        AND PASSWORD = :2
+        AND IS_ACTIVE = TRUE
+    """, [user_name, password]).to_pandas()
 
-        return df.iloc[0]["APP_ROLE"].lower()
-
-    except Exception as e:
-        st.error(f"Authentication error: {str(e)}")
+    if df.empty:
         return None
+
+    return df.iloc[0]["APP_ROLE"].lower()
 
 # -----------------------------------------------------------------------------
 # LLM Call
 # -----------------------------------------------------------------------------
-def call_llm(prompt):
-    try:
-        sql = "SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER"
-        row = session.sql(sql, params=[MODEL_NAME, prompt]).collect()[0]
-        return row["ANSWER"]
-    except Exception as e:
-        return f"LLM error: {str(e)}"
+def call_llm(model_name, prompt):
+
+    sql = """
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER
+    """
+
+    row = session.sql(sql, params=[model_name, prompt]).collect()[0]
+    return row["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Vector Search
+# Mask Final Answer (Only for Non-Admin)
 # -----------------------------------------------------------------------------
-def vector_search(query):
-    try:
-        sql = f"""
-            WITH query_vec AS (
-                SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_768(
-                    '{EMBED_MODEL}',
-                    ?
-                ) AS emb
-            )
-            SELECT
-                CHUNK_TEXT,
-                VECTOR_COSINE_SIMILARITY(EMBEDDING, q.emb) AS SCORE
-            FROM DOCS_CHUNKS, query_vec q
-            ORDER BY SCORE DESC
-            LIMIT {TOP_K}
-        """
+def mask_answer_with_llm(answer_text):
 
-        df = session.sql(sql, params=[query]).to_pandas()
+    masking_prompt = f"""
+You are a healthcare data privacy engine.
 
-        if df.empty:
-            return None, 0
+Mask ALL PII and PHI in the text below.
 
-        best_score = df.iloc[0]["SCORE"]
-
-        if best_score < SIMILARITY_THRESHOLD:
-            return None, best_score
-
-        context = "\n\n---\n\n".join(df["CHUNK_TEXT"].tolist())
-        return context, best_score
-
-    except Exception as e:
-        st.error(f"Vector search error: {str(e)}")
-        return None, 0
-
-# -----------------------------------------------------------------------------
-# Extract Candidate Entities
-# -----------------------------------------------------------------------------
-def extract_entities(entity_type):
-    try:
-        chunks = session.sql("SELECT CHUNK_TEXT FROM DOCS_CHUNKS").to_pandas()
-
-        if chunks.empty:
-            return []
-
-        full_text = "\n\n".join(chunks["CHUNK_TEXT"].tolist())
-
-        prompt = f"""
-Extract ALL unique {entity_type} names from text below.
-Return ONLY comma-separated list.
-No explanation.
+Rules:
+- Replace sensitive values with exactly "XXXXXX"
+- Keep text readable
+- Do not explain anything
+- Return only masked text
 
 Text:
-{full_text}
+{answer_text}
 
-Output:
+Masked Output:
 """
 
-        response = call_llm(prompt)
-        candidates = [x.strip() for x in response.split(",") if x.strip()]
-        return sorted(list(set(candidates)))
-
-    except Exception as e:
-        st.error(f"Entity extraction error: {str(e)}")
-        return []
+    return call_llm("llama3.1-70b", masking_prompt)
 
 # -----------------------------------------------------------------------------
-# Validate Entities via Vector Similarity
+# Generate Presigned URL
 # -----------------------------------------------------------------------------
-def get_valid_entities(entity_type):
-    valid_entities = []
-    candidates = extract_entities(entity_type)
+def get_presigned_url(file_name):
 
-    for name in candidates:
-        _, score = vector_search(name)
-        if score >= SIMILARITY_THRESHOLD:
-            valid_entities.append(name)
+    sql = f"""
+        SELECT GET_PRESIGNED_URL(
+            @{STAGE_NAME},
+            '{file_name}',
+            3600
+        ) AS URL
+    """
 
-    return valid_entities
-
-# -----------------------------------------------------------------------------
-# Generate Entity Details
-# -----------------------------------------------------------------------------
-def generate_entity_details(name, entity_type):
-    context, score = vector_search(name)
-
-    if not context:
-        return f"No strong contextual match found for {name}."
-
-    prompt = f"""
-You are a medical document assistant.
-
-Provide complete details about {entity_type} "{name}".
-Use ONLY context below.
-Do not hallucinate.
-
-Context:
-{context}
-
-Answer:
-"""
-
-    return call_llm(prompt)
+    result = session.sql(sql).collect()
+    return result[0]["URL"]
 
 # -----------------------------------------------------------------------------
 # LOGIN SCREEN
@@ -188,24 +111,24 @@ if not st.session_state.authenticated:
     st.title("🔐 Chatbot Login")
 
     with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
+        login_user = st.text_input("Username",placeholder="e.g. Vedant")
+        login_password = st.text_input("Password", type="password")
         login_btn = st.form_submit_button("Login")
 
     if login_btn:
 
-        if not username.strip() or not password.strip():
+        if not login_user.strip() or not login_password.strip():
             st.warning("Please enter username and password.")
             st.stop()
 
-        role = authenticate_user(username, password)
+        role = authenticate_user(login_user, login_password)
 
         if not role:
-            st.error("Invalid username or password.")
+            st.error("❌ Invalid username or password.")
             st.stop()
 
         st.session_state.authenticated = True
-        st.session_state.username = username
+        st.session_state.username = login_user
         st.session_state.app_role = role
         st.rerun()
 
@@ -216,99 +139,141 @@ if not st.session_state.authenticated:
 # -----------------------------------------------------------------------------
 st.sidebar.success("Authenticated")
 st.sidebar.write("👤 User:", st.session_state.username)
-st.sidebar.write("🛡️ Role:", st.session_state.app_role.upper())
+st.sidebar.write("🛡️ App Role:", st.session_state.app_role.upper())
 
 if st.sidebar.button("🚪 Logout"):
     st.session_state.clear()
     st.rerun()
 
 # -----------------------------------------------------------------------------
-# ADMIN / OWNER ENTITY EXPLORER
+# Main App
 # -----------------------------------------------------------------------------
-if st.session_state.app_role in ["admin", "owner"]:
+st.title("📄 PDF Chatbot on Snowflake")
 
-    st.sidebar.markdown("## 🔎 Data Explorer")
+top_k = 10
+model = "llama3.1-70b"
+SIMILARITY_THRESHOLD = 0.65  # adjust if needed
 
-    category = st.sidebar.radio(
-        "Select Category",
-        ["Patient", "Doctor", "Hospital"]
-    )
+# -----------------------------------------------------------------------------
+# Vector Search
+# -----------------------------------------------------------------------------
+def call_search(query, k):
 
-    if st.sidebar.button("Load Entities"):
+    search_sql = f"""
+        WITH query_vec AS (
+            SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_768(
+                'snowflake-arctic-embed-m',
+                ?
+            ) AS emb
+        )
+        SELECT
+            c.CHUNK_TEXT,
+            c.SOURCE_FILE,
+            VECTOR_COSINE_SIMILARITY(c.EMBEDDING, q.emb) AS SCORE
+        FROM DOCS_CHUNKS c
+        CROSS JOIN query_vec q
+        ORDER BY SCORE DESC
+        LIMIT {k}
+    """
 
-        with st.spinner("Analyzing documents..."):
+    return session.sql(search_sql, params=[query]).to_pandas()
+
+# -----------------------------------------------------------------------------
+# Render Chat History
+# -----------------------------------------------------------------------------
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
+
+# -----------------------------------------------------------------------------
+# Chat Input
+# -----------------------------------------------------------------------------
+prompt = st.chat_input("Type your question about the PDFs")
+
+if prompt:
+
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+    with st.chat_message("user"):
+        st.write(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
 
             try:
-                entities = get_valid_entities(category)
+                chunks_df = call_search(prompt, top_k)
 
-                if entities:
-                    st.session_state["entities"] = entities
-                    st.session_state["entity_category"] = category
-                    st.sidebar.success(f"{len(entities)} entities loaded.")
+                if chunks_df.empty:
+                    answer = "No relevant content found in documents."
+                    st.write(answer)
+
                 else:
-                    st.sidebar.warning("No high-confidence entities found.")
+                    # -----------------------------
+                    # Generate Answer
+                    # -----------------------------
+                    context_text = "\n\n---\n\n".join(
+                        chunks_df["CHUNK_TEXT"].tolist()
+                    )
 
-            except Exception as e:
-                st.sidebar.error(f"Error loading entities: {str(e)}")
+                    full_prompt = f"""
+You are a medical document assistant.
 
-    if "entities" in st.session_state:
+Answer using ONLY the context below.
+Be precise.
+Do not hallucinate.
 
-        st.sidebar.markdown("### Available Entities")
+Context:
+{context_text}
 
-        for name in st.session_state["entities"]:
+Question:
+{prompt}
 
-            if st.sidebar.button(name, key=f"{category}_{name}"):
+Answer:
+"""
 
-                answer = generate_entity_details(
-                    name,
-                    st.session_state["entity_category"]
-                )
+                    answer = call_llm(model, full_prompt)
+
+                    # Mask for non-admin
+                    if st.session_state.app_role not in ["admin", "owner"]:
+                        answer = mask_answer_with_llm(answer)
+
+                    st.write(answer)
+
+                    # -----------------------------
+                    # Admin: Show Most Relevant PDF
+                    # -----------------------------
+                    if st.session_state.app_role in ["admin", "owner"]:
+
+                        # Calculate average similarity per file
+                        file_scores = (
+                            chunks_df
+                            .groupby("SOURCE_FILE")["SCORE"]
+                            .mean()
+                            .reset_index()
+                            .sort_values("SCORE", ascending=False)
+                        )
+
+                        best_file = file_scores.iloc[0]["SOURCE_FILE"]
+                        best_score = file_scores.iloc[0]["SCORE"]
+
+                        if best_score >= SIMILARITY_THRESHOLD:
+
+                            st.markdown("### 📥 Most Relevant PDF")
+
+                            url = get_presigned_url(best_file)
+
+                            st.link_button(
+                                f"Download {best_file} (Score: {best_score:.3f})",
+                                url
+                            )
 
                 st.session_state.messages.append(
                     {"role": "assistant", "content": answer}
                 )
 
-# -----------------------------------------------------------------------------
-# MAIN CHAT WINDOW
-# -----------------------------------------------------------------------------
-st.title("📄 PDF Chatbot on Snowflake")
-
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.write(msg["content"])
-
-user_input = st.chat_input("Ask about your PDFs")
-
-if user_input:
-
-    st.session_state.messages.append(
-        {"role": "user", "content": user_input}
-    )
-
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-
-            context, score = vector_search(user_input)
-
-            if not context:
-                answer = "No relevant content found."
-            else:
-                prompt = f"""
-Answer question using ONLY context below.
-Do not hallucinate.
-
-Context:
-{context}
-
-Question:
-{user_input}
-
-Answer:
-"""
-                answer = call_llm(prompt)
-
-            st.write(answer)
-
-            st.session_state.messages.append(
-                {"role": "assistant", "content": answer}
-            )
+            except Exception as e:
+                err_msg = f"Error: {str(e)}"
+                st.error(err_msg)
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": err_msg}
+                )
