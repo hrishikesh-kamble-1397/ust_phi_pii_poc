@@ -42,7 +42,6 @@ if "messages" not in st.session_state:
 # Authentication
 # -----------------------------------------------------------------------------
 def authenticate_user(user_name, password):
-
     try:
         df = session.sql("""
             SELECT APP_ROLE
@@ -68,12 +67,10 @@ def authenticate_user(user_name, password):
 # LLM Call
 # -----------------------------------------------------------------------------
 def call_llm(prompt):
-
     try:
-        sql = """SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER"""
+        sql = "SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER"
         row = session.sql(sql, params=[MODEL_NAME, prompt]).collect()[0]
         return row["ANSWER"]
-
     except Exception as e:
         return f"LLM error: {str(e)}"
 
@@ -81,7 +78,6 @@ def call_llm(prompt):
 # Vector Search
 # -----------------------------------------------------------------------------
 def vector_search(query):
-
     try:
         sql = f"""
             WITH query_vec AS (
@@ -92,7 +88,6 @@ def vector_search(query):
             )
             SELECT
                 CHUNK_TEXT,
-                SOURCE_FILE,
                 VECTOR_COSINE_SIMILARITY(EMBEDDING, q.emb) AS SCORE
             FROM DOCS_CHUNKS, query_vec q
             ORDER BY SCORE DESC
@@ -110,7 +105,6 @@ def vector_search(query):
             return None, best_score
 
         context = "\n\n---\n\n".join(df["CHUNK_TEXT"].tolist())
-
         return context, best_score
 
     except Exception as e:
@@ -121,7 +115,6 @@ def vector_search(query):
 # Extract Candidate Entities
 # -----------------------------------------------------------------------------
 def extract_entities(entity_type):
-
     try:
         chunks = session.sql("SELECT CHUNK_TEXT FROM DOCS_CHUNKS").to_pandas()
 
@@ -142,9 +135,7 @@ Output:
 """
 
         response = call_llm(prompt)
-
         candidates = [x.strip() for x in response.split(",") if x.strip()]
-
         return sorted(list(set(candidates)))
 
     except Exception as e:
@@ -152,10 +143,9 @@ Output:
         return []
 
 # -----------------------------------------------------------------------------
-# Validate Entities with Vector Similarity
+# Validate Entities via Vector Similarity
 # -----------------------------------------------------------------------------
 def get_valid_entities(entity_type):
-
     valid_entities = []
     candidates = extract_entities(entity_type)
 
@@ -170,7 +160,6 @@ def get_valid_entities(entity_type):
 # Generate Entity Details
 # -----------------------------------------------------------------------------
 def generate_entity_details(name, entity_type):
-
     context, score = vector_search(name)
 
     if not context:
@@ -247,15 +236,20 @@ if st.session_state.app_role in ["admin", "owner"]:
 
     if st.sidebar.button("Load Entities"):
 
-        with st.sidebar.spinner("Analyzing documents..."):
+        with st.spinner("Analyzing documents..."):
 
-            entities = get_valid_entities(category)
+            try:
+                entities = get_valid_entities(category)
 
-            if entities:
-                st.session_state["entities"] = entities
-                st.session_state["entity_category"] = category
-            else:
-                st.sidebar.warning("No high-confidence entities found.")
+                if entities:
+                    st.session_state["entities"] = entities
+                    st.session_state["entity_category"] = category
+                    st.sidebar.success(f"{len(entities)} entities loaded.")
+                else:
+                    st.sidebar.warning("No high-confidence entities found.")
+
+            except Exception as e:
+                st.sidebar.error(f"Error loading entities: {str(e)}")
 
     if "entities" in st.session_state:
 
