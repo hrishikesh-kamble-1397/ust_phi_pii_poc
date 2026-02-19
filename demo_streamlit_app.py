@@ -3,59 +3,163 @@ import pandas as pd
 from snowflake.snowpark.context import get_active_session
 
 # -----------------------------------------------------------------------------
-# APP CONFIG
+# App Config
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="PDF + Database Chatbot", page_icon="📄", layout="wide")
+st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
 
+# -----------------------------------------------------------------------------
+# Snowflake Session
+# -----------------------------------------------------------------------------
 session = get_active_session()
-
-SIMILARITY_THRESHOLD = 0.70
-MODEL_NAME = "llama3.1-70b"
+STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
 
 # -----------------------------------------------------------------------------
-# SESSION STATE INIT
+# Session State Initialization
 # -----------------------------------------------------------------------------
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if "username" not in st.session_state:
+    st.session_state.username = None
+
+if "app_role" not in st.session_state:
+    st.session_state.app_role = None
+
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "Ask me anything about your PDFs or Database."}
+        {"role": "assistant", "content": "Ask me anything about your PDFs."}
     ]
 
 # -----------------------------------------------------------------------------
-# SIDEBAR TOGGLE
+# Authentication
 # -----------------------------------------------------------------------------
-st.sidebar.markdown("## ⚙️ Data Source")
+def authenticate_user(user_name, password):
 
-data_mode = st.sidebar.toggle(
-    "Use Database Instead of PDFs",
-    value=False
-)
+    df = session.sql("""
+        SELECT APP_ROLE
+        FROM AI_POC_DB.PII_PHI_POC.APP_USER_ACCESS
+        WHERE (
+            UPPER(USER_NAME) = UPPER(:1)
+            OR UPPER(USER_NAME) = SPLIT(UPPER(:1), '@')[0]
+        )
+        AND PASSWORD = :2
+        AND IS_ACTIVE = TRUE
+    """, [user_name, password]).to_pandas()
 
-if data_mode:
-    st.sidebar.success("🗄️ Database Mode Enabled")
-else:
-    st.sidebar.success("📄 PDF Mode Enabled")
+    if df.empty:
+        return None
+
+    return df.iloc[0]["APP_ROLE"].lower()
 
 # -----------------------------------------------------------------------------
-# HELPER: GET CURRENT ROLE (RBAC)
+# LLM Call
 # -----------------------------------------------------------------------------
-def get_current_role():
-    role_df = session.sql("SELECT CURRENT_ROLE()").collect()
-    return role_df[0][0]
+def call_llm(model_name, prompt):
 
-# -----------------------------------------------------------------------------
-# LLM CALL (CORTEX COMPLETE)
-# -----------------------------------------------------------------------------
-def call_llm(prompt):
-    sql = """SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER"""
-    row = session.sql(sql, params=[MODEL_NAME, prompt]).collect()[0]
+    sql = """
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER
+    """
+
+    row = session.sql(sql, params=[model_name, prompt]).collect()[0]
     return row["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# PDF VECTOR SEARCH
+# Mask Final Answer (Only for Non-Admin)
 # -----------------------------------------------------------------------------
-def search_pdf_context(query):
+def mask_answer_with_llm(answer_text):
 
-    sql = """
+    masking_prompt = f"""
+You are a healthcare data privacy engine.
+
+Mask ALL PII and PHI in the text below.
+
+Rules:
+- Replace sensitive values with exactly "XXXXXX"
+- Keep text readable
+- Do not explain anything
+- Return only masked text
+
+Text:
+{answer_text}
+
+Masked Output:
+"""
+
+    return call_llm("llama3.1-70b", masking_prompt)
+
+# -----------------------------------------------------------------------------
+# Generate Presigned URL
+# -----------------------------------------------------------------------------
+def get_presigned_url(file_name):
+
+    sql = f"""
+        SELECT GET_PRESIGNED_URL(
+            @{STAGE_NAME},
+            '{file_name}',
+            3600
+        ) AS URL
+    """
+
+    result = session.sql(sql).collect()
+    return result[0]["URL"]
+
+# -----------------------------------------------------------------------------
+# LOGIN SCREEN
+# -----------------------------------------------------------------------------
+if not st.session_state.authenticated:
+
+    st.title("🔐 Chatbot Login")
+
+    with st.form("login_form"):
+        login_user = st.text_input("Username",placeholder="e.g. Vedant")
+        login_password = st.text_input("Password", type="password")
+        login_btn = st.form_submit_button("Login")
+
+    if login_btn:
+
+        if not login_user.strip() or not login_password.strip():
+            st.warning("Please enter username and password.")
+            st.stop()
+
+        role = authenticate_user(login_user, login_password)
+
+        if not role:
+            st.error("❌ Invalid username or password.")
+            st.stop()
+
+        st.session_state.authenticated = True
+        st.session_state.username = login_user
+        st.session_state.app_role = role
+        st.rerun()
+
+    st.stop()
+
+# -----------------------------------------------------------------------------
+# Sidebar
+# -----------------------------------------------------------------------------
+st.sidebar.success("Authenticated")
+st.sidebar.write("👤 User:", st.session_state.username)
+st.sidebar.write("🛡️ App Role:", st.session_state.app_role.upper())
+
+if st.sidebar.button("🚪 Logout"):
+    st.session_state.clear()
+    st.rerun()
+
+# -----------------------------------------------------------------------------
+# Main App
+# -----------------------------------------------------------------------------
+st.title("📄 PDF Chatbot on Snowflake")
+
+top_k = 10
+model = "llama3.1-70b"
+SIMILARITY_THRESHOLD = 0.65  # adjust if needed
+
+# -----------------------------------------------------------------------------
+# Vector Search
+# -----------------------------------------------------------------------------
+def call_search(query, k):
+
+    search_sql = f"""
         WITH query_vec AS (
             SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_768(
                 'snowflake-arctic-embed-m',
@@ -63,144 +167,113 @@ def search_pdf_context(query):
             ) AS emb
         )
         SELECT
-            CHUNK_TEXT,
-            VECTOR_COSINE_SIMILARITY(EMBEDDING, q.emb) AS SCORE
-        FROM DOCS_CHUNKS, query_vec q
+            c.CHUNK_TEXT,
+            c.SOURCE_FILE,
+            VECTOR_COSINE_SIMILARITY(c.EMBEDDING, q.emb) AS SCORE
+        FROM DOCS_CHUNKS c
+        CROSS JOIN query_vec q
         ORDER BY SCORE DESC
-        LIMIT 5
+        LIMIT {k}
     """
 
-    df = session.sql(sql, params=[query]).to_pandas()
-
-    if df.empty:
-        return None, 0
-
-    best_score = df.iloc[0]["SCORE"]
-
-    if best_score < SIMILARITY_THRESHOLD:
-        return None, best_score
-
-    context = "\n\n---\n\n".join(df["CHUNK_TEXT"].tolist())
-
-    return context, best_score
+    return session.sql(search_sql, params=[query]).to_pandas()
 
 # -----------------------------------------------------------------------------
-# DATABASE MODE (TEXT OUTPUT WITH RBAC)
+# Render Chat History
 # -----------------------------------------------------------------------------
-def search_database_context(user_query):
-
-    # Step 1: Convert Question → SQL
-    sql_prompt = f"""
-    Convert this question into SQL query.
-    Use only PATIENT_DATA table.
-    Do not explain.
-    Return only SQL.
-
-    Question:
-    {user_query}
-
-    SQL:
-    """
-
-    sql_query = call_llm(sql_prompt)
-
-    try:
-        # Step 2: Execute SQL (Snowflake handles RBAC + Masking)
-        df = session.sql(sql_query).to_pandas()
-
-        if df.empty:
-            return None
-
-        # Step 3: Convert records into JSON text context
-        data_context = df.to_json(orient="records")
-
-        # Step 4: Convert structured data → natural language
-        answer_prompt = f"""
-        You are a medical assistant.
-
-        Using ONLY the database records below,
-        answer clearly in paragraph format.
-
-        Do not hallucinate.
-        Do not mention SQL.
-        Do not show table format.
-
-        Database Records:
-        {data_context}
-
-        Question:
-        {user_query}
-
-        Answer:
-        """
-
-        final_answer = call_llm(answer_prompt)
-
-        return final_answer
-
-    except Exception as e:
-        return f"Database Error: {str(e)}"
-
-# -----------------------------------------------------------------------------
-# MAIN UI
-# -----------------------------------------------------------------------------
-st.title("📄 PDF + Database Chatbot")
-
-# Display chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
 
-# User input
-user_input = st.chat_input("Ask your question")
+# -----------------------------------------------------------------------------
+# Chat Input
+# -----------------------------------------------------------------------------
+prompt = st.chat_input("Type your question about the PDFs")
 
-if user_input:
+if prompt:
 
-    # Add user message
-    st.session_state.messages.append(
-        {"role": "user", "content": user_input}
-    )
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+    with st.chat_message("user"):
+        st.write(prompt)
 
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
 
-            if data_mode:
-                # DATABASE MODE
-                answer = search_database_context(user_input)
+            try:
+                chunks_df = call_search(prompt, top_k)
 
-                if not answer:
-                    answer = "No relevant database information found."
+                if chunks_df.empty:
+                    answer = "No relevant content found in documents."
+                    st.write(answer)
 
-            else:
-                # PDF MODE
-                context, score = search_pdf_context(user_input)
-
-                if not context:
-                    answer = "No relevant content found in PDFs."
                 else:
-                    prompt = f"""
-                    Answer using ONLY the context below.
-                    Do not hallucinate.
+                    # -----------------------------
+                    # Generate Answer
+                    # -----------------------------
+                    context_text = "\n\n---\n\n".join(
+                        chunks_df["CHUNK_TEXT"].tolist()
+                    )
 
-                    Context:
-                    {context}
+                    full_prompt = f"""
+You are a medical document assistant.
 
-                    Question:
-                    {user_input}
+Answer using ONLY the context below.
+Be precise.
+Do not hallucinate.
 
-                    Answer:
-                    """
-                    answer = call_llm(prompt)
+Context:
+{context_text}
 
-            st.write(answer)
+Question:
+{prompt}
 
-            st.session_state.messages.append(
-                {"role": "assistant", "content": answer}
-            )
+Answer:
+"""
 
-# -----------------------------------------------------------------------------
-# FOOTER (OPTIONAL DEBUG INFO)
-# -----------------------------------------------------------------------------
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 🔐 Security Info")
-st.sidebar.write("Current Role:", get_current_role())
+                    answer = call_llm(model, full_prompt)
+
+                    # Mask for non-admin
+                    if st.session_state.app_role not in ["admin", "owner"]:
+                        answer = mask_answer_with_llm(answer)
+
+                    st.write(answer)
+
+                    # -----------------------------
+                    # Admin: Show Most Relevant PDF
+                    # -----------------------------
+                    if st.session_state.app_role in ["admin", "owner"]:
+
+                        # Calculate average similarity per file
+                        file_scores = (
+                            chunks_df
+                            .groupby("SOURCE_FILE")["SCORE"]
+                            .mean()
+                            .reset_index()
+                            .sort_values("SCORE", ascending=False)
+                        )
+
+                        best_file = file_scores.iloc[0]["SOURCE_FILE"]
+                        best_score = file_scores.iloc[0]["SCORE"]
+
+                        if best_score >= SIMILARITY_THRESHOLD:
+
+                            st.markdown("### 📥 Most Relevant PDF")
+
+                            url = get_presigned_url(best_file)
+
+                            st.link_button(
+                                f"Download {best_file} (Score: {best_score:.3f})",
+                                url
+                            )
+
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": answer}
+                )
+
+            except Exception as e:
+                err_msg = f"Error: {str(e)}"
+                st.error(err_msg)
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": err_msg}
+                )
