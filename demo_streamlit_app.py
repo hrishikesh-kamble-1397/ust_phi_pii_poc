@@ -1,8 +1,6 @@
-import re
 import streamlit as st
 import pandas as pd
 from snowflake.snowpark.context import get_active_session
-from datetime import datetime
 
 # -----------------------------------------------------------------------------
 # App config
@@ -27,7 +25,7 @@ if "app_role" not in st.session_state:
     st.session_state.app_role = None
 
 # -----------------------------------------------------------------------------
-# Authenticate User (Username + Password)
+# Authenticate User
 # -----------------------------------------------------------------------------
 def authenticate_user(user_name, password):
 
@@ -48,6 +46,52 @@ def authenticate_user(user_name, password):
     return df.iloc[0]["APP_ROLE"].lower()
 
 # -----------------------------------------------------------------------------
+# LLM Call (Generic)
+# -----------------------------------------------------------------------------
+def call_llm(model_name: str, prompt: str) -> str:
+
+    llm_sql = """
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER
+    """
+
+    row = session.sql(llm_sql, params=[model_name, prompt]).collect()[0]
+    return row["ANSWER"]
+
+# -----------------------------------------------------------------------------
+# LLM-Based PII/PHI Masking
+# -----------------------------------------------------------------------------
+def mask_sensitive_data_with_llm(text: str) -> str:
+    """
+    Uses LLM to detect and mask PII/PHI.
+    """
+
+    masking_prompt = f"""
+You are a healthcare data privacy engine.
+
+Your task:
+- Detect ALL PII and PHI in the text below.
+- Replace sensitive values with exactly "XXXXXX".
+- Keep the structure and formatting unchanged.
+- Do NOT remove non-sensitive content.
+- Do NOT explain anything.
+- Return only the masked text.
+
+PII includes:
+Names, Aadhaar, PAN, phone numbers, emails, addresses, IDs, claim numbers.
+
+PHI includes:
+Medical record numbers, diagnoses tied to person, admission dates,
+discharge dates, prescriptions, lab values linked to identity.
+
+Text:
+{text}
+
+Masked Output:
+"""
+
+    return call_llm("llama3.1-70b", masking_prompt)
+
+# -----------------------------------------------------------------------------
 # LOGIN SCREEN
 # -----------------------------------------------------------------------------
 if not st.session_state.authenticated:
@@ -56,17 +100,8 @@ if not st.session_state.authenticated:
     st.caption("Authenticate to access PDF Chatbot")
 
     with st.form("login_form"):
-
-        login_user = st.text_input(
-            "Username",
-            placeholder="e.g. vedant"
-        )
-
-        login_password = st.text_input(
-            "Password",
-            type="password"
-        )
-
+        login_user = st.text_input("Username")
+        login_password = st.text_input("Password", type="password")
         login_btn = st.form_submit_button("Login")
 
     if login_btn:
@@ -84,13 +119,12 @@ if not st.session_state.authenticated:
         st.session_state.authenticated = True
         st.session_state.username = login_user
         st.session_state.app_role = role
-
         st.rerun()
 
     st.stop()
 
 # -----------------------------------------------------------------------------
-# Sidebar – User Info
+# Sidebar
 # -----------------------------------------------------------------------------
 st.sidebar.success("Authenticated")
 st.sidebar.write("👤 User:", st.session_state.username)
@@ -104,18 +138,13 @@ if st.sidebar.button("🚪 Logout"):
 # Main App
 # -----------------------------------------------------------------------------
 st.title("📄 PDF Chatbot on Snowflake")
+
 top_k = 10
 model = "llama3.1-70b"
 show_sources = False
 
 # -----------------------------------------------------------------------------
-# Admin-only PII/PHI Section
-# -----------------------------------------------------------------------------
-# if st.session_state.app_role == "admin":
-    
-
-# -----------------------------------------------------------------------------
-# Helper Functions
+# Vector Search
 # -----------------------------------------------------------------------------
 def call_search(query: str, k: int) -> pd.DataFrame:
 
@@ -137,16 +166,6 @@ def call_search(query: str, k: int) -> pd.DataFrame:
     """
 
     return session.sql(search_sql, params=[query]).to_pandas()
-
-
-def call_llm(model_name: str, prompt: str) -> str:
-
-    llm_sql = """
-        SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER
-    """
-
-    row = session.sql(llm_sql, params=[model_name, prompt]).collect()[0]
-    return row["ANSWER"]
 
 # -----------------------------------------------------------------------------
 # Chat History
@@ -179,7 +198,9 @@ if prompt := st.chat_input("Type your question about the PDFs"):
                 if chunks_df.empty:
                     answer = "No relevant content found in documents."
                     st.write(answer)
-                    st.session_state.messages.append({"role": "assistant", "content": answer})
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": answer}
+                    )
                 else:
                     context_blocks = []
 
@@ -187,9 +208,9 @@ if prompt := st.chat_input("Type your question about the PDFs"):
 
                         txt = row["CHUNK_TEXT"]
 
-                        # Mask content for non-admin users
-                        if st.session_state.app_role != "admin":
-                            txt = "[REDACTED CONTENT]"
+                        # Role-based logic
+                        if st.session_state.app_role not in ["admin", "owner"]:
+                            txt = mask_sensitive_data_with_llm(txt)
 
                         context_blocks.append(
                             f"File: {row['SOURCE_FILE']}\n"
@@ -201,7 +222,8 @@ if prompt := st.chat_input("Type your question about the PDFs"):
 
                     system_prompt = (
                         "Answer strictly using provided context. "
-                        "If answer not found, say you don't know."
+                        "If answer not found, say you don't know. "
+                        "Do not hallucinate."
                     )
 
                     full_prompt = f"""
@@ -218,11 +240,10 @@ Answer:
 
                     st.write(answer)
 
-                    # Admin-only source visibility
                     if show_sources:
                         with st.expander("Retrieved Sources"):
                             st.dataframe(
-                                chunks_df[["SOURCE_FILE", "SCORE", "CHUNK_TEXT"]],
+                                chunks_df[["SOURCE_FILE", "SCORE"]],
                                 use_container_width=True
                             )
 
