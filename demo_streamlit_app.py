@@ -3,7 +3,7 @@ import pandas as pd
 from snowflake.snowpark.context import get_active_session
 
 # -----------------------------------------------------------------------------
-# App config
+# App Config
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
 
@@ -23,6 +23,11 @@ if "username" not in st.session_state:
 
 if "app_role" not in st.session_state:
     st.session_state.app_role = None
+
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Ask me anything about your PDFs."}
+    ]
 
 # -----------------------------------------------------------------------------
 # Authenticate User
@@ -48,7 +53,7 @@ def authenticate_user(user_name, password):
 # -----------------------------------------------------------------------------
 # Generic LLM Call
 # -----------------------------------------------------------------------------
-def call_llm(model_name: str, prompt: str) -> str:
+def call_llm(model_name, prompt):
 
     sql = """
         SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER
@@ -58,20 +63,19 @@ def call_llm(model_name: str, prompt: str) -> str:
     return row["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Mask Final Answer Using LLM (NOT CHUNKS)
+# Mask Final Answer (Only For Non-Admin)
 # -----------------------------------------------------------------------------
-def mask_answer_with_llm(answer_text: str) -> str:
+def mask_answer_with_llm(answer_text):
 
     masking_prompt = f"""
-You are a healthcare privacy engine.
+You are a healthcare data privacy engine.
 
 Mask ALL PII and PHI in the text below.
 
 Rules:
 - Replace sensitive values with exactly "XXXXXX"
-- Keep the sentence readable
-- Do NOT remove non-sensitive info
-- Do NOT explain
+- Keep text readable
+- Do not explain anything
 - Return only masked text
 
 Text:
@@ -88,7 +92,6 @@ Masked Output:
 if not st.session_state.authenticated:
 
     st.title("🔐 Chatbot Login")
-    st.caption("Authenticate to access PDF Chatbot")
 
     with st.form("login_form"):
         login_user = st.text_input("Username")
@@ -110,6 +113,7 @@ if not st.session_state.authenticated:
         st.session_state.authenticated = True
         st.session_state.username = login_user
         st.session_state.app_role = role
+
         st.rerun()
 
     st.stop()
@@ -136,7 +140,7 @@ model = "llama3.1-70b"
 # -----------------------------------------------------------------------------
 # Vector Search
 # -----------------------------------------------------------------------------
-def call_search(query: str, k: int) -> pd.DataFrame:
+def call_search(query, k):
 
     search_sql = f"""
         WITH query_vec AS (
@@ -158,13 +162,8 @@ def call_search(query: str, k: int) -> pd.DataFrame:
     return session.sql(search_sql, params=[query]).to_pandas()
 
 # -----------------------------------------------------------------------------
-# Chat History
+# Render Chat History
 # -----------------------------------------------------------------------------
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "Ask me anything about your PDFs."}
-    ]
-
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
@@ -172,7 +171,9 @@ for msg in st.session_state.messages:
 # -----------------------------------------------------------------------------
 # Chat Input
 # -----------------------------------------------------------------------------
-if prompt := st.chat_input("Type your question about the PDFs"):
+prompt = st.chat_input("Type your question about the PDFs")
+
+if prompt:
 
     st.session_state.messages.append({"role": "user", "content": prompt})
 
@@ -192,16 +193,12 @@ if prompt := st.chat_input("Type your question about the PDFs"):
                         chunks_df["CHUNK_TEXT"].tolist()
                     )
 
-                    system_prompt = """
+                    full_prompt = f"""
 You are a medical document assistant.
 
-Answer the question using ONLY the context below.
+Answer using ONLY the context below.
 Be precise.
 Do not hallucinate.
-"""
-
-                    full_prompt = f"""
-{system_prompt}
 
 Context:
 {context_text}
@@ -212,10 +209,10 @@ Question:
 Answer:
 """
 
-                    # 1️⃣ Generate FULL Answer using RAW data
+                    # Step 1: Generate full answer
                     answer = call_llm(model, full_prompt)
 
-                    # 2️⃣ If NOT admin → Mask final answer
+                    # Step 2: Mask answer if not admin
                     if st.session_state.app_role not in ["admin", "owner"]:
                         answer = mask_answer_with_llm(answer)
 
@@ -226,6 +223,8 @@ Answer:
                 )
 
             except Exception as e:
-                err_msg = f"Error: {e}"
+                err_msg = f"Error: {str(e)}"
                 st.error(err_msg)
                 st.session_state.messages.append(
+                    {"role": "assistant", "content": err_msg}
+                )
