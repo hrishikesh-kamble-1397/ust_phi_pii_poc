@@ -7,16 +7,31 @@ from snowflake.snowpark.context import get_active_session
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
 
-session = get_active_session()
+# -----------------------------------------------------------------------------
+# Snowflake Session
+# -----------------------------------------------------------------------------
+try:
+    session = get_active_session()
+except Exception as e:
+    st.error(f"Snowflake session error: {str(e)}")
+    st.stop()
 
-SIMILARITY_THRESHOLD = 0.70
 MODEL_NAME = "llama3.1-70b"
+EMBED_MODEL = "snowflake-arctic-embed-m"
+SIMILARITY_THRESHOLD = 0.70
+TOP_K = 5
 
 # -----------------------------------------------------------------------------
-# Session State Init
+# Session State Initialization
 # -----------------------------------------------------------------------------
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
+
+if "username" not in st.session_state:
+    st.session_state.username = None
+
+if "app_role" not in st.session_state:
+    st.session_state.app_role = None
 
 if "messages" not in st.session_state:
     st.session_state.messages = [
@@ -24,59 +39,100 @@ if "messages" not in st.session_state:
     ]
 
 # -----------------------------------------------------------------------------
+# Authentication
+# -----------------------------------------------------------------------------
+def authenticate_user(user_name, password):
+
+    try:
+        df = session.sql("""
+            SELECT APP_ROLE
+            FROM AI_POC_DB.PII_PHI_POC.APP_USER_ACCESS
+            WHERE (
+                UPPER(USER_NAME) = UPPER(:1)
+                OR UPPER(USER_NAME) = SPLIT(UPPER(:1), '@')[0]
+            )
+            AND PASSWORD = :2
+            AND IS_ACTIVE = TRUE
+        """, [user_name, password]).to_pandas()
+
+        if df.empty:
+            return None
+
+        return df.iloc[0]["APP_ROLE"].lower()
+
+    except Exception as e:
+        st.error(f"Authentication error: {str(e)}")
+        return None
+
+# -----------------------------------------------------------------------------
 # LLM Call
 # -----------------------------------------------------------------------------
 def call_llm(prompt):
-    sql = """SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER"""
-    row = session.sql(sql, params=[MODEL_NAME, prompt]).collect()[0]
-    return row["ANSWER"]
+
+    try:
+        sql = """SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER"""
+        row = session.sql(sql, params=[MODEL_NAME, prompt]).collect()[0]
+        return row["ANSWER"]
+
+    except Exception as e:
+        return f"LLM error: {str(e)}"
 
 # -----------------------------------------------------------------------------
-# Vector Search for Entity
+# Vector Search
 # -----------------------------------------------------------------------------
-def search_entity_context(query):
+def vector_search(query):
 
-    sql = f"""
-        WITH query_vec AS (
-            SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_768(
-                'snowflake-arctic-embed-m',
-                ?
-            ) AS emb
-        )
-        SELECT
-            CHUNK_TEXT,
-            VECTOR_COSINE_SIMILARITY(EMBEDDING, q.emb) AS SCORE
-        FROM DOCS_CHUNKS, query_vec q
-        ORDER BY SCORE DESC
-        LIMIT 5
-    """
+    try:
+        sql = f"""
+            WITH query_vec AS (
+                SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_768(
+                    '{EMBED_MODEL}',
+                    ?
+                ) AS emb
+            )
+            SELECT
+                CHUNK_TEXT,
+                SOURCE_FILE,
+                VECTOR_COSINE_SIMILARITY(EMBEDDING, q.emb) AS SCORE
+            FROM DOCS_CHUNKS, query_vec q
+            ORDER BY SCORE DESC
+            LIMIT {TOP_K}
+        """
 
-    df = session.sql(sql, params=[query]).to_pandas()
+        df = session.sql(sql, params=[query]).to_pandas()
 
-    if df.empty:
+        if df.empty:
+            return None, 0
+
+        best_score = df.iloc[0]["SCORE"]
+
+        if best_score < SIMILARITY_THRESHOLD:
+            return None, best_score
+
+        context = "\n\n---\n\n".join(df["CHUNK_TEXT"].tolist())
+
+        return context, best_score
+
+    except Exception as e:
+        st.error(f"Vector search error: {str(e)}")
         return None, 0
 
-    best_score = df.iloc[0]["SCORE"]
-
-    if best_score < SIMILARITY_THRESHOLD:
-        return None, best_score
-
-    context = "\n\n---\n\n".join(df["CHUNK_TEXT"].tolist())
-
-    return context, best_score
-
 # -----------------------------------------------------------------------------
-# Extract and Filter Valid Entities
+# Extract Candidate Entities
 # -----------------------------------------------------------------------------
-def get_valid_entities(entity_type):
+def extract_entities(entity_type):
 
-    # Step 1: Extract names using LLM
-    all_chunks = session.sql("SELECT CHUNK_TEXT FROM DOCS_CHUNKS").to_pandas()
-    full_text = "\n\n".join(all_chunks["CHUNK_TEXT"].tolist())
+    try:
+        chunks = session.sql("SELECT CHUNK_TEXT FROM DOCS_CHUNKS").to_pandas()
 
-    prompt = f"""
+        if chunks.empty:
+            return []
+
+        full_text = "\n\n".join(chunks["CHUNK_TEXT"].tolist())
+
+        prompt = f"""
 Extract ALL unique {entity_type} names from text below.
-Return ONLY comma separated list.
+Return ONLY comma-separated list.
 No explanation.
 
 Text:
@@ -85,26 +141,37 @@ Text:
 Output:
 """
 
-    response = call_llm(prompt)
+        response = call_llm(prompt)
 
-    candidates = [x.strip() for x in response.split(",") if x.strip()]
+        candidates = [x.strip() for x in response.split(",") if x.strip()]
+
+        return sorted(list(set(candidates)))
+
+    except Exception as e:
+        st.error(f"Entity extraction error: {str(e)}")
+        return []
+
+# -----------------------------------------------------------------------------
+# Validate Entities with Vector Similarity
+# -----------------------------------------------------------------------------
+def get_valid_entities(entity_type):
 
     valid_entities = []
+    candidates = extract_entities(entity_type)
 
-    # Step 2: Validate using Vector Similarity
     for name in candidates:
-        _, score = search_entity_context(name)
+        _, score = vector_search(name)
         if score >= SIMILARITY_THRESHOLD:
             valid_entities.append(name)
 
-    return sorted(list(set(valid_entities)))
+    return valid_entities
 
 # -----------------------------------------------------------------------------
 # Generate Entity Details
 # -----------------------------------------------------------------------------
 def generate_entity_details(name, entity_type):
 
-    context, score = search_entity_context(name)
+    context, score = vector_search(name)
 
     if not context:
         return f"No strong contextual match found for {name}."
@@ -125,14 +192,51 @@ Answer:
     return call_llm(prompt)
 
 # -----------------------------------------------------------------------------
-# MAIN APP
+# LOGIN SCREEN
 # -----------------------------------------------------------------------------
-st.sidebar.success("Authenticated")
+if not st.session_state.authenticated:
+
+    st.title("🔐 Chatbot Login")
+
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        login_btn = st.form_submit_button("Login")
+
+    if login_btn:
+
+        if not username.strip() or not password.strip():
+            st.warning("Please enter username and password.")
+            st.stop()
+
+        role = authenticate_user(username, password)
+
+        if not role:
+            st.error("Invalid username or password.")
+            st.stop()
+
+        st.session_state.authenticated = True
+        st.session_state.username = username
+        st.session_state.app_role = role
+        st.rerun()
+
+    st.stop()
 
 # -----------------------------------------------------------------------------
-# ADMIN SIDEBAR ENTITY PANEL
+# Sidebar
 # -----------------------------------------------------------------------------
-if st.session_state.get("app_role") in ["admin", "owner"]:
+st.sidebar.success("Authenticated")
+st.sidebar.write("👤 User:", st.session_state.username)
+st.sidebar.write("🛡️ Role:", st.session_state.app_role.upper())
+
+if st.sidebar.button("🚪 Logout"):
+    st.session_state.clear()
+    st.rerun()
+
+# -----------------------------------------------------------------------------
+# ADMIN / OWNER ENTITY EXPLORER
+# -----------------------------------------------------------------------------
+if st.session_state.app_role in ["admin", "owner"]:
 
     st.sidebar.markdown("## 🔎 Data Explorer")
 
@@ -153,14 +257,13 @@ if st.session_state.get("app_role") in ["admin", "owner"]:
             else:
                 st.sidebar.warning("No high-confidence entities found.")
 
-    # Show buttons instead of dropdown
     if "entities" in st.session_state:
 
         st.sidebar.markdown("### Available Entities")
 
         for name in st.session_state["entities"]:
 
-            if st.sidebar.button(name):
+            if st.sidebar.button(name, key=f"{category}_{name}"):
 
                 answer = generate_entity_details(
                     name,
@@ -172,9 +275,9 @@ if st.session_state.get("app_role") in ["admin", "owner"]:
                 )
 
 # -----------------------------------------------------------------------------
-# Main Chat Window
+# MAIN CHAT WINDOW
 # -----------------------------------------------------------------------------
-st.title("📄 PDF Chatbot")
+st.title("📄 PDF Chatbot on Snowflake")
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -191,7 +294,7 @@ if user_input:
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
 
-            context, score = search_entity_context(user_input)
+            context, score = vector_search(user_input)
 
             if not context:
                 answer = "No relevant content found."
