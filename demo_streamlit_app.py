@@ -154,7 +154,6 @@ def get_presigned_url(file_name):
 # VECTOR SEARCH (FIXED)
 # -----------------------------------------------------------------------------
 def call_search(query):
-
     search_sql = f"""
         WITH query_vec AS (
             SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_768(
@@ -177,7 +176,6 @@ def call_search(query):
     """
 
     return session.sql(search_sql, params=[query]).to_pandas()
-
 # -----------------------------------------------------------------------------
 # LOGIN SCREEN
 # -----------------------------------------------------------------------------
@@ -241,7 +239,7 @@ if prompt:
                 optimized_query = rewrite_query(prompt)
 
                 # STEP 2 — Vector Search
-                chunks_df = call_search(query)
+                chunks_df = call_search(optimized_query)
 
                 if chunks_df.empty:
                     answer = "No relevant content found in documents."
