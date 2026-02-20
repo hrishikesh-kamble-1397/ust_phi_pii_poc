@@ -19,7 +19,7 @@ STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
 MODEL_NAME = "llama3.1-70b"
 EMBED_MODEL = "snowflake-arctic-embed-m"
 SIMILARITY_THRESHOLD = 0.65
-MAX_CHUNKS = 50   # Increased from 10
+MAX_CHUNKS = 15   # Increased from 10
 
 # -----------------------------------------------------------------------------
 # Session State
@@ -67,6 +67,61 @@ def call_llm(prompt):
     """
     row = session.sql(sql, params=[MODEL_NAME, prompt]).collect()[0]
     return row["ANSWER"]
+
+# -----------------------------------------------------------------------------
+# Multi-Prompt Step 1: Query Rewrite
+# -----------------------------------------------------------------------------
+def rewrite_query(user_question):
+    rewrite_prompt = f"""
+Rewrite the question into a concise search query
+optimized for retrieving medical document content.
+
+Return only the rewritten query.
+
+Question:
+{user_question}
+
+Optimized Query:
+"""
+    return call_llm(rewrite_prompt).strip()
+
+# -----------------------------------------------------------------------------
+# Multi-Prompt Step 2: Grounded Answer
+# -----------------------------------------------------------------------------
+def generate_answer(question, context_text):
+    answer_prompt = f"""
+You are a medical document assistant.
+
+RULES:
+- Answer ONLY using the provided context.
+- If the answer is not found in the context, say:
+  "The documents do not contain this information."
+- Do NOT use outside knowledge.
+- Be concise and factual.
+
+Context:
+{context_text}
+
+Question:
+{question}
+
+Answer:
+"""
+    return call_llm(answer_prompt)
+
+# -----------------------------------------------------------------------------
+# Multi-Prompt Step 3: Masking (PII/PHI Protection)
+# -----------------------------------------------------------------------------
+def mask_answer(answer_text):
+    masking_prompt = f"""
+Mask ALL PII and PHI in the text below.
+Replace sensitive values with exactly "XXXXXX".
+Return only masked text.
+
+Text:
+{answer_text}
+"""
+    return call_llm(masking_prompt)
 
 # -----------------------------------------------------------------------------
 # Masking
@@ -165,7 +220,6 @@ if st.sidebar.button("Logout"):
 # -----------------------------------------------------------------------------
 st.title("📄 PDF Chatbot on Snowflake")
 
-# Render chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
@@ -180,50 +234,34 @@ if prompt:
         st.write(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Searching documents..."):
+        with st.spinner("Processing..."):
 
             try:
-                chunks_df = call_search(prompt)
+                # STEP 1 — Query Rewrite
+                optimized_query = rewrite_query(prompt)
+
+                # STEP 2 — Vector Search
+                chunks_df = call_search(query)
 
                 if chunks_df.empty:
                     answer = "No relevant content found in documents."
                     st.write(answer)
 
                 else:
-
-                    # -----------------------------
-                    # Build context safely
-                    # -----------------------------
                     context_text = "\n\n---\n\n".join(
                         chunks_df["CHUNK_TEXT"].tolist()
                     )
 
-                    full_prompt = f"""
-You are a medical document assistant.
+                    # STEP 3 — Grounded Answer
+                    answer = generate_answer(prompt, context_text)
 
-Answer ONLY using provided context.
-Do not hallucinate.
-
-Context:
-{context_text}
-
-Question:
-{prompt}
-
-Answer:
-"""
-
-                    answer = call_llm(full_prompt)
-
-                    # Mask for non-admin
+                    # STEP 4 — Role-Based Masking
                     if st.session_state.app_role not in ["admin", "owner"]:
                         answer = mask_answer(answer)
 
                     st.write(answer)
 
-                    # -----------------------------
-                    # FIXED: Best PDF using MAX score
-                    # -----------------------------
+                    # Best Matching PDF
                     file_scores = (
                         chunks_df
                         .groupby("SOURCE_FILE")["SCORE"]
@@ -236,11 +274,8 @@ Answer:
                     best_score = file_scores.iloc[0]["SCORE"]
 
                     if best_score >= SIMILARITY_THRESHOLD:
-
                         st.markdown("### 📥 Most Relevant PDF")
-
                         url = get_presigned_url(best_file)
-
                         st.link_button(
                             f"Download {best_file} (Score: {best_score:.3f})",
                             url
