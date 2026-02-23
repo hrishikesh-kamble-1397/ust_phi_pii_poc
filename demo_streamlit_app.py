@@ -233,7 +233,7 @@ if prompt:
 
                 else:
                     context_text = "\n\n---\n\n".join(
-                        chunks_df["CHUNK_TEXT"].tolist()
+                        chunks_df["CLEANED_CHUNK_TEXT"].tolist()
                     )
 
                     # STEP 3 — Grounded Answer
