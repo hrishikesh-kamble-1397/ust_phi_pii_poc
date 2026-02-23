@@ -124,20 +124,6 @@ Text:
     return call_llm(masking_prompt)
 
 # -----------------------------------------------------------------------------
-# Masking
-# -----------------------------------------------------------------------------
-def mask_answer(answer_text):
-    masking_prompt = f"""
-Mask ALL PII and PHI in the text below.
-Replace sensitive values with exactly "XXXXXX".
-Return only masked text.
-
-Text:
-{answer_text}
-"""
-    return call_llm(masking_prompt)
-
-# -----------------------------------------------------------------------------
 # Presigned URL
 # -----------------------------------------------------------------------------
 def get_presigned_url(file_name):
