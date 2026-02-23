@@ -153,7 +153,7 @@ def call_search(query):
                 c.CLEAN_TEXT,
                 c.SOURCE_FILE,
                 VECTOR_COSINE_SIMILARITY(c.EMBEDDING, q.emb) AS SCORE
-            FROM AI_POC_DB.PII_PHI_POC.CLEANED_CHUNKS c
+            FROM AI_POC_DB.PII_PHI_POC.CLEANED_CHUNK_TEXT c
             CROSS JOIN query_vec q
         )
         WHERE SCORE >= {SIMILARITY_THRESHOLD}
