@@ -14,11 +14,11 @@ session = get_active_session()
 STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
 
 # -----------------------------------------------------------------------------
-# Settings
+# Settings (UPDATED)
 # -----------------------------------------------------------------------------
-MODEL_NAME = "llama3.1-70b"
+MODEL_NAME = "mistral-large2"  # Upgraded model
 EMBED_MODEL = "snowflake-arctic-embed-m"
-SIMILARITY_THRESHOLD = 0.50
+SIMILARITY_THRESHOLD = 0.35    # Lowered for better name detection
 MAX_CHUNKS = 30
 
 # -----------------------------------------------------------------------------
@@ -69,12 +69,23 @@ def call_llm(prompt):
     return result[0]["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Masking
+# Masking (Improved)
 # -----------------------------------------------------------------------------
 def mask_answer(answer_text):
     masking_prompt = f"""
-Mask ALL PII and PHI in the text below.
-Replace sensitive values with exactly "XXXXXX".
+You are a compliance assistant.
+
+Mask ALL PII and PHI including:
+- Names
+- Dates of birth
+- Addresses
+- Phone numbers
+- IDs
+- Lab values tied to a person
+- Any identifiable patient information
+
+Replace each sensitive value with exactly: XXXXXX
+
 Return only masked text.
 
 Text:
@@ -96,7 +107,7 @@ def get_presigned_url(file_name):
     return session.sql(sql).collect()[0]["URL"]
 
 # -----------------------------------------------------------------------------
-# Hybrid Search (Vector + Keyword)
+# Hybrid Search (Improved Scoring)
 # -----------------------------------------------------------------------------
 def call_search(query):
 
@@ -124,7 +135,7 @@ def call_search(query):
                 CHUNK_TEXT,
                 SOURCE_FILE,
                 PAGE_NUM,
-                1.0 AS SCORE
+                0.75 AS SCORE
             FROM AI_POC_DB.PII_PHI_POC.DOCS_CHUNKS_NEW
             WHERE CHUNK_TEXT ILIKE '%' || ? || '%'
         )
@@ -206,11 +217,10 @@ if prompt:
                 chunks_df = call_search(prompt)
 
                 if chunks_df.empty:
-                    answer = "No relevant content found in documents."
+                    answer = "Information not found in documents."
                     st.write(answer)
 
                 else:
-                    # Build context
                     context_text = "\n\n".join(
                         [
                             f"[File: {row.SOURCE_FILE} | Page: {row.PAGE_NUM}]\n{row.CHUNK_TEXT}"
@@ -222,10 +232,13 @@ if prompt:
 You are a medical document assistant.
 
 STRICT RULES:
-- Answer ONLY using provided context.
-- If answer not found, say: "Information not found in documents."
-- Do NOT hallucinate.
-- Keep numeric values exact.
+- Use ONLY the provided context.
+- If answer not explicitly present, say:
+  "Information not found in documents."
+- Do NOT infer missing names.
+- Do NOT guess.
+- Preserve numeric values exactly.
+- If a patient name exists, extract it exactly as written.
 
 Context:
 {context_text}
@@ -243,7 +256,7 @@ Answer:
 
                     st.write(answer)
 
-                    # Determine best PDF
+                    # Best PDF Selection
                     file_scores = (
                         chunks_df
                         .groupby("SOURCE_FILE")["SCORE"]
