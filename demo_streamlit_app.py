@@ -18,8 +18,8 @@ STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
 # -----------------------------------------------------------------------------
 MODEL_NAME = "llama3.1-70b"
 EMBED_MODEL = "snowflake-arctic-embed-m"
-SIMILARITY_THRESHOLD = 0.65
-#--MAX_CHUNKS = 50   # You can now safely increase this
+SIMILARITY_THRESHOLD = 0.70   # Slightly stricter
+MAX_CHUNKS = 20               # Better precision
 
 # -----------------------------------------------------------------------------
 # Session State
@@ -69,47 +69,6 @@ def call_llm(prompt):
     return row["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Query Rewrite
-# -----------------------------------------------------------------------------
-def rewrite_query(user_question):
-    rewrite_prompt = f"""
-Rewrite the question into a concise search query
-optimized for retrieving medical document content.
-
-Return only the rewritten query.
-
-Question:
-{user_question}
-
-Optimized Query:
-"""
-    return call_llm(rewrite_prompt).strip()
-
-# -----------------------------------------------------------------------------
-# Grounded Answer
-# -----------------------------------------------------------------------------
-def generate_answer(question, context_text):
-    answer_prompt = f"""
-You are a medical document assistant.
-
-RULES:
-- Answer ONLY using the provided context.
-- If the answer is not found in the context, say:
-  "The documents do not contain this information."
-- Do NOT use outside knowledge.
-- Be concise and factual.
-
-Context:
-{context_text}
-
-Question:
-{question}
-
-Answer:
-"""
-    return call_llm(answer_prompt)
-
-# -----------------------------------------------------------------------------
 # Masking
 # -----------------------------------------------------------------------------
 def mask_answer(answer_text):
@@ -137,9 +96,10 @@ def get_presigned_url(file_name):
     return session.sql(sql).collect()[0]["URL"]
 
 # -----------------------------------------------------------------------------
-# VECTOR SEARCH
+# VECTOR SEARCH (UPDATED FOR DOCS_CHUNKS_NEW)
 # -----------------------------------------------------------------------------
 def call_search(query):
+
     search_sql = f"""
         WITH query_vec AS (
             SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_768(
@@ -147,52 +107,20 @@ def call_search(query):
                 ?
             ) AS emb
         )
-        SELECT *
-        FROM (
-            SELECT
-                c.CLEANED_CHUNK_TEXT,
-                c.SOURCE_FILE,
-                VECTOR_COSINE_SIMILARITY(c.EMBEDDING, q.emb) AS SCORE
-            FROM AI_POC_DB.PII_PHI_POC.CLEANED_CHUNKS c
-            CROSS JOIN query_vec q
-        )
-        WHERE SCORE >= {SIMILARITY_THRESHOLD}
+        SELECT
+            c.CHUNK_TEXT,
+            c.SOURCE_FILE,
+            c.PAGE_NUM,
+            VECTOR_COSINE_SIMILARITY(c.EMBEDDING, q.emb) AS SCORE
+        FROM AI_POC_DB.PII_PHI_POC.DOCS_CHUNKS_NEW c
+        CROSS JOIN query_vec q
+        WHERE c.EMBEDDING IS NOT NULL
+        QUALIFY SCORE >= {SIMILARITY_THRESHOLD}
         ORDER BY SCORE DESC
-        
+        LIMIT {MAX_CHUNKS}
     """
 
     return session.sql(search_sql, params=[query]).to_pandas()
-
-# -----------------------------------------------------------------------------
-# ITERATIVE GROUNDED ANSWERING (NEW)
-# -----------------------------------------------------------------------------
-def iterative_grounded_answer(question, chunks_df, batch_size=5):
-    """
-    Incrementally builds context and queries the LLM in iterations.
-    Stops early when an answer is found.
-    Prevents token overflow.
-    """
-    context_accumulator = ""
-    total_chunks = len(chunks_df)
-
-    for start in range(0, total_chunks, batch_size):
-        end = start + batch_size
-
-        batch_chunks = chunks_df.iloc[start:end]["CLEANED_CHUNK_TEXT"].tolist()
-
-        context_accumulator += "\n\n---\n\n".join(batch_chunks) + "\n\n"
-
-        answer = generate_answer(question, context_accumulator).strip()
-
-        # If LLM gives something meaningful, return early
-        if (
-            "not found" not in answer.lower()
-            and "do not contain" not in answer.lower()
-            and "cannot find" not in answer.lower()
-        ):
-            return answer
-
-    return "The documents do not contain this information."
 
 # -----------------------------------------------------------------------------
 # LOGIN SCREEN
@@ -236,6 +164,7 @@ if st.sidebar.button("Logout"):
 # -----------------------------------------------------------------------------
 st.title("📄 PDF Chatbot on Snowflake")
 
+# Render chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
@@ -250,34 +179,54 @@ if prompt:
         st.write(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Processing..."):
+        with st.spinner("Searching documents..."):
 
             try:
-                # STEP 1 — Query Rewrite
-                optimized_query = rewrite_query(prompt)
-
-                # STEP 2 — Vector Search
-                chunks_df = call_search(optimized_query)
+                chunks_df = call_search(prompt)
 
                 if chunks_df.empty:
                     answer = "No relevant content found in documents."
                     st.write(answer)
 
                 else:
-                    # STEP 3 — Iterative Grounded Answer (NEW)
-                    answer = iterative_grounded_answer(
-                        prompt,
-                        chunks_df,
-                        batch_size=5
+
+                    # Better structured context
+                    context_text = "\n\n".join(
+                        [
+                            f"[File: {row.SOURCE_FILE} | Page: {row.PAGE_NUM}]\n{row.CHUNK_TEXT}"
+                            for _, row in chunks_df.iterrows()
+                        ]
                     )
 
-                    # STEP 4 — Role-Based Masking
+                    full_prompt = f"""
+You are a medical document assistant.
+
+STRICT RULES:
+- Answer ONLY using provided context.
+- If answer is not found, say: "Information not found in documents."
+- Do not hallucinate.
+- Do not assume.
+
+Context:
+{context_text}
+
+Question:
+{prompt}
+
+Answer:
+"""
+
+                    answer = call_llm(full_prompt)
+
+                    # Mask for non-admin users
                     if st.session_state.app_role not in ["admin", "owner"]:
                         answer = mask_answer(answer)
 
                     st.write(answer)
 
-                    # BEST MATCHING PDF
+                    # -----------------------------
+                    # Find MOST relevant file only
+                    # -----------------------------
                     file_scores = (
                         chunks_df
                         .groupby("SOURCE_FILE")["SCORE"]
@@ -290,8 +239,11 @@ if prompt:
                     best_score = file_scores.iloc[0]["SCORE"]
 
                     if best_score >= SIMILARITY_THRESHOLD:
+
                         st.markdown("### 📥 Most Relevant PDF")
+
                         url = get_presigned_url(best_file)
+
                         st.link_button(
                             f"Download {best_file} (Score: {best_score:.3f})",
                             url
