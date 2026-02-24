@@ -18,11 +18,11 @@ STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
 # -----------------------------------------------------------------------------
 MODEL_NAME = "llama3.1-70b"
 EMBED_MODEL = "snowflake-arctic-embed-m"
-SIMILARITY_THRESHOLD = 0.70   # Slightly stricter
-MAX_CHUNKS = 20               # Better precision
+SIMILARITY_THRESHOLD = 0.70
+MAX_CHUNKS = 20
 
 # -----------------------------------------------------------------------------
-# Session State
+# Session State Initialization
 # -----------------------------------------------------------------------------
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
@@ -59,17 +59,17 @@ def authenticate_user(user_name, password):
     return df.iloc[0]["APP_ROLE"].lower()
 
 # -----------------------------------------------------------------------------
-# LLM
+# LLM Call
 # -----------------------------------------------------------------------------
 def call_llm(prompt):
     sql = """
         SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER
     """
-    row = session.sql(sql, params=[MODEL_NAME, prompt]).collect()[0]
-    return row["ANSWER"]
+    result = session.sql(sql, params=[MODEL_NAME, prompt]).collect()
+    return result[0]["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Masking
+# Masking Function
 # -----------------------------------------------------------------------------
 def mask_answer(answer_text):
     masking_prompt = f"""
@@ -96,7 +96,7 @@ def get_presigned_url(file_name):
     return session.sql(sql).collect()[0]["URL"]
 
 # -----------------------------------------------------------------------------
-# VECTOR SEARCH (UPDATED FOR DOCS_CHUNKS_NEW)
+# Vector Search (FIXED - No QUALIFY)
 # -----------------------------------------------------------------------------
 def call_search(query):
 
@@ -107,15 +107,18 @@ def call_search(query):
                 ?
             ) AS emb
         )
-        SELECT
-            c.CHUNK_TEXT,
-            c.SOURCE_FILE,
-            c.PAGE_NUM,
-            VECTOR_COSINE_SIMILARITY(c.EMBEDDING, q.emb) AS SCORE
-        FROM AI_POC_DB.PII_PHI_POC.DOCS_CHUNKS_NEW c
-        CROSS JOIN query_vec q
-        WHERE c.EMBEDDING IS NOT NULL
-        QUALIFY SCORE >= {SIMILARITY_THRESHOLD}
+        SELECT *
+        FROM (
+            SELECT
+                c.CHUNK_TEXT,
+                c.SOURCE_FILE,
+                c.PAGE_NUM,
+                VECTOR_COSINE_SIMILARITY(c.EMBEDDING, q.emb) AS SCORE
+            FROM AI_POC_DB.PII_PHI_POC.DOCS_CHUNKS_NEW c
+            CROSS JOIN query_vec q
+            WHERE c.EMBEDDING IS NOT NULL
+        )
+        WHERE SCORE >= {SIMILARITY_THRESHOLD}
         ORDER BY SCORE DESC
         LIMIT {MAX_CHUNKS}
     """
@@ -160,11 +163,11 @@ if st.sidebar.button("Logout"):
     st.rerun()
 
 # -----------------------------------------------------------------------------
-# MAIN APP
+# MAIN APPLICATION
 # -----------------------------------------------------------------------------
 st.title("📄 PDF Chatbot on Snowflake")
 
-# Render chat history
+# Render Chat History
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
@@ -179,6 +182,7 @@ if prompt:
         st.write(prompt)
 
     with st.chat_message("assistant"):
+
         with st.spinner("Searching documents..."):
 
             try:
@@ -189,8 +193,7 @@ if prompt:
                     st.write(answer)
 
                 else:
-
-                    # Better structured context
+                    # Build structured context
                     context_text = "\n\n".join(
                         [
                             f"[File: {row.SOURCE_FILE} | Page: {row.PAGE_NUM}]\n{row.CHUNK_TEXT}"
@@ -203,9 +206,9 @@ You are a medical document assistant.
 
 STRICT RULES:
 - Answer ONLY using provided context.
-- If answer is not found, say: "Information not found in documents."
-- Do not hallucinate.
-- Do not assume.
+- If answer not found, say: "Information not found in documents."
+- Do NOT hallucinate.
+- Keep numeric values exact.
 
 Context:
 {context_text}
@@ -218,15 +221,15 @@ Answer:
 
                     answer = call_llm(full_prompt)
 
-                    # Mask for non-admin users
+                    # Mask if not admin/owner
                     if st.session_state.app_role not in ["admin", "owner"]:
                         answer = mask_answer(answer)
 
                     st.write(answer)
 
-                    # -----------------------------
-                    # Find MOST relevant file only
-                    # -----------------------------
+                    # -------------------------
+                    # Best PDF Selection
+                    # -------------------------
                     file_scores = (
                         chunks_df
                         .groupby("SOURCE_FILE")["SCORE"]
@@ -239,11 +242,8 @@ Answer:
                     best_score = file_scores.iloc[0]["SCORE"]
 
                     if best_score >= SIMILARITY_THRESHOLD:
-
                         st.markdown("### 📥 Most Relevant PDF")
-
                         url = get_presigned_url(best_file)
-
                         st.link_button(
                             f"Download {best_file} (Score: {best_score:.3f})",
                             url
