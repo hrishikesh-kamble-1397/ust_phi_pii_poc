@@ -14,12 +14,12 @@ session = get_active_session()
 STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
 
 # -----------------------------------------------------------------------------
-# Settings (Safer Configuration)
+# Settings (More Strict Retrieval)
 # -----------------------------------------------------------------------------
 MODEL_NAME = "mistral-large2"
 EMBED_MODEL = "snowflake-arctic-embed-m"
-SIMILARITY_THRESHOLD = 0.50   # Increased to reduce irrelevant chunks
-MAX_CHUNKS = 20               # Reduced to prevent context overload
+SIMILARITY_THRESHOLD = 0.60   # Increased to reduce irrelevant matches
+MAX_CHUNKS = 10               # Reduced to prevent over-context
 
 # -----------------------------------------------------------------------------
 # Session State
@@ -59,24 +59,15 @@ def authenticate_user(user_name, password):
     return df.iloc[0]["APP_ROLE"].lower()
 
 # -----------------------------------------------------------------------------
-# LLM Call (STRICT CONTROLLED GENERATION)
+# LLM Call (Snowflake-Compatible)
 # -----------------------------------------------------------------------------
 def call_llm(prompt):
-
     sql = """
         SELECT SNOWFLAKE.CORTEX.COMPLETE(
             ?,
-            OBJECT_CONSTRUCT(
-                'prompt', ?,
-                'temperature', 0,
-                'max_tokens', 500,
-                'top_p', 0,
-                'presence_penalty', 0,
-                'frequency_penalty', 0
-            )
+            ?
         ) AS ANSWER
     """
-
     result = session.sql(sql, params=[MODEL_NAME, prompt]).collect()
     return result[0]["ANSWER"]
 
@@ -86,7 +77,7 @@ def call_llm(prompt):
 def mask_answer(answer_text):
 
     masking_prompt = f"""
-You are a compliance engine.
+You are a compliance masking engine.
 
 Mask ALL PII and PHI:
 - Names
@@ -95,7 +86,7 @@ Mask ALL PII and PHI:
 - Phone numbers
 - IDs
 - Lab values tied to a person
-- Any identifiable patient info
+- Any identifiable patient information
 
 Replace each sensitive value with exactly: XXXXXX
 
@@ -104,14 +95,12 @@ Return ONLY masked text.
 Text:
 {answer_text}
 """
-
     return call_llm(masking_prompt)
 
 # -----------------------------------------------------------------------------
 # Presigned URL
 # -----------------------------------------------------------------------------
 def get_presigned_url(file_name):
-
     sql = f"""
         SELECT GET_PRESIGNED_URL(
             @{STAGE_NAME},
@@ -119,7 +108,6 @@ def get_presigned_url(file_name):
             3600
         ) AS URL
     """
-
     return session.sql(sql).collect()[0]["URL"]
 
 # -----------------------------------------------------------------------------
@@ -151,7 +139,7 @@ def call_search(query):
                 CHUNK_TEXT,
                 SOURCE_FILE,
                 PAGE_NUM,
-                0.75 AS SCORE
+                0.80 AS SCORE
             FROM AI_POC_DB.PII_PHI_POC.DOCS_CHUNKS_NEW
             WHERE CHUNK_TEXT ILIKE '%' || ? || '%'
         )
@@ -211,6 +199,7 @@ if st.sidebar.button("Logout"):
 # -----------------------------------------------------------------------------
 st.title("📄 PDF Chatbot on Snowflake")
 
+# Render chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
@@ -248,16 +237,16 @@ if prompt:
 You are a STRICT document extraction engine.
 
 RULES:
-- Use ONLY the provided context.
-- Copy exact sentences from context.
-- Do NOT summarize.
-- Do NOT explain.
-- Do NOT infer.
-- Do NOT rephrase.
-- If exact answer not found, return exactly:
+1. Use ONLY the provided context.
+2. Copy text EXACTLY as written.
+3. Do NOT summarize.
+4. Do NOT explain.
+5. Do NOT infer.
+6. Do NOT rephrase.
+7. If exact answer not found, return exactly:
 Information not found in documents.
 
-Return ONLY verbatim text from context.
+Return ONLY verbatim extracted text.
 
 Context:
 {context_text}
@@ -275,7 +264,7 @@ Answer:
 
                     st.write(answer)
 
-                    # Best File Selection
+                    # Most Relevant File
                     file_scores = (
                         chunks_df
                         .groupby("SOURCE_FILE")["SCORE"]
