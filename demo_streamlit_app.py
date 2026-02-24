@@ -19,7 +19,7 @@ STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
 MODEL_NAME = "llama3.1-70b"
 EMBED_MODEL = "snowflake-arctic-embed-m"
 SIMILARITY_THRESHOLD = 0.65
-MAX_CHUNKS = 50   # You can now safely increase this
+#--MAX_CHUNKS = 50   # You can now safely increase this
 
 # -----------------------------------------------------------------------------
 # Session State
