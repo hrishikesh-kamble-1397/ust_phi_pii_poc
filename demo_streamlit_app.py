@@ -3,7 +3,7 @@ import pandas as pd
 from snowflake.snowpark.context import get_active_session
 
 # -----------------------------------------------------------------------------
-# App Config
+# App Configuration
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
 
