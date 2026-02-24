@@ -14,12 +14,12 @@ session = get_active_session()
 STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
 
 # -----------------------------------------------------------------------------
-# Settings
+# Settings (Safer Configuration)
 # -----------------------------------------------------------------------------
 MODEL_NAME = "mistral-large2"
 EMBED_MODEL = "snowflake-arctic-embed-m"
-SIMILARITY_THRESHOLD = 0.35
-MAX_CHUNKS = 30
+SIMILARITY_THRESHOLD = 0.50   # Increased to reduce irrelevant chunks
+MAX_CHUNKS = 20               # Reduced to prevent context overload
 
 # -----------------------------------------------------------------------------
 # Session State
@@ -59,29 +59,43 @@ def authenticate_user(user_name, password):
     return df.iloc[0]["APP_ROLE"].lower()
 
 # -----------------------------------------------------------------------------
-# LLM Call
+# LLM Call (STRICT CONTROLLED GENERATION)
 # -----------------------------------------------------------------------------
 def call_llm(prompt):
+
     sql = """
-        SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(
+            ?,
+            OBJECT_CONSTRUCT(
+                'prompt', ?,
+                'temperature', 0,
+                'max_tokens', 500,
+                'top_p', 0,
+                'presence_penalty', 0,
+                'frequency_penalty', 0
+            )
+        ) AS ANSWER
     """
+
     result = session.sql(sql, params=[MODEL_NAME, prompt]).collect()
     return result[0]["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Masking
+# Masking (For non-admin users)
 # -----------------------------------------------------------------------------
 def mask_answer(answer_text):
+
     masking_prompt = f"""
 You are a compliance engine.
 
 Mask ALL PII and PHI:
 - Names
-- Dates
-- IDs
-- Phone numbers
+- DOB
 - Addresses
+- Phone numbers
+- IDs
 - Lab values tied to a person
+- Any identifiable patient info
 
 Replace each sensitive value with exactly: XXXXXX
 
@@ -90,12 +104,14 @@ Return ONLY masked text.
 Text:
 {answer_text}
 """
+
     return call_llm(masking_prompt)
 
 # -----------------------------------------------------------------------------
 # Presigned URL
 # -----------------------------------------------------------------------------
 def get_presigned_url(file_name):
+
     sql = f"""
         SELECT GET_PRESIGNED_URL(
             @{STAGE_NAME},
@@ -103,6 +119,7 @@ def get_presigned_url(file_name):
             3600
         ) AS URL
     """
+
     return session.sql(sql).collect()[0]["URL"]
 
 # -----------------------------------------------------------------------------
@@ -226,16 +243,21 @@ if prompt:
                         ]
                     )
 
+                    # STRICT EXTRACTIVE PROMPT
                     full_prompt = f"""
-You are a medical document assistant.
+You are a STRICT document extraction engine.
 
-STRICT RULES:
-- Answer using ONLY the provided context.
-- Do NOT add new medical knowledge.
-- Do NOT infer missing information.
-- If answer not clearly present, say:
-  "Information not found in documents."
-- Keep numeric values exactly as written.
+RULES:
+- Use ONLY the provided context.
+- Copy exact sentences from context.
+- Do NOT summarize.
+- Do NOT explain.
+- Do NOT infer.
+- Do NOT rephrase.
+- If exact answer not found, return exactly:
+Information not found in documents.
+
+Return ONLY verbatim text from context.
 
 Context:
 {context_text}
@@ -248,31 +270,12 @@ Answer:
 
                     answer = call_llm(full_prompt)
 
-                    # -------------------------------
-                    # Soft Anti-Hallucination Check
-                    # -------------------------------
-                    normalized_context = context_text.lower().replace("\n", " ")
-                    normalized_answer = answer.lower().strip()
-
-                    if len(normalized_answer) < 5:
-                        answer = "Information not found in documents."
-                    elif normalized_answer not in normalized_context:
-                        overlap_found = False
-                        for sentence in normalized_answer.split("."):
-                            sentence = sentence.strip()
-                            if len(sentence) > 10 and sentence in normalized_context:
-                                overlap_found = True
-                                break
-                        if not overlap_found:
-                            answer = "Information not found in documents."
-
-                    # Role-based masking
                     if st.session_state.app_role not in ["admin", "owner"]:
                         answer = mask_answer(answer)
 
                     st.write(answer)
 
-                    # Determine best PDF
+                    # Best File Selection
                     file_scores = (
                         chunks_df
                         .groupby("SOURCE_FILE")["SCORE"]
