@@ -19,7 +19,7 @@ STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
 MODEL_NAME = "llama3.1-70b"
 EMBED_MODEL = "snowflake-arctic-embed-m"
 SIMILARITY_THRESHOLD = 0.65
-MAX_CHUNKS = 15   # Increased from 10
+MAX_CHUNKS = 50   # You can now safely increase this
 
 # -----------------------------------------------------------------------------
 # Session State
@@ -69,7 +69,7 @@ def call_llm(prompt):
     return row["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Multi-Prompt Step 1: Query Rewrite
+# Query Rewrite
 # -----------------------------------------------------------------------------
 def rewrite_query(user_question):
     rewrite_prompt = f"""
@@ -86,7 +86,7 @@ Optimized Query:
     return call_llm(rewrite_prompt).strip()
 
 # -----------------------------------------------------------------------------
-# Multi-Prompt Step 2: Grounded Answer
+# Grounded Answer
 # -----------------------------------------------------------------------------
 def generate_answer(question, context_text):
     answer_prompt = f"""
@@ -110,7 +110,7 @@ Answer:
     return call_llm(answer_prompt)
 
 # -----------------------------------------------------------------------------
-# Multi-Prompt Step 3: Masking (PII/PHI Protection)
+# Masking
 # -----------------------------------------------------------------------------
 def mask_answer(answer_text):
     masking_prompt = f"""
@@ -137,7 +137,7 @@ def get_presigned_url(file_name):
     return session.sql(sql).collect()[0]["URL"]
 
 # -----------------------------------------------------------------------------
-# VECTOR SEARCH (FIXED)
+# VECTOR SEARCH
 # -----------------------------------------------------------------------------
 def call_search(query):
     search_sql = f"""
@@ -162,6 +162,38 @@ def call_search(query):
     """
 
     return session.sql(search_sql, params=[query]).to_pandas()
+
+# -----------------------------------------------------------------------------
+# ITERATIVE GROUNDED ANSWERING (NEW)
+# -----------------------------------------------------------------------------
+def iterative_grounded_answer(question, chunks_df, batch_size=5):
+    """
+    Incrementally builds context and queries the LLM in iterations.
+    Stops early when an answer is found.
+    Prevents token overflow.
+    """
+    context_accumulator = ""
+    total_chunks = len(chunks_df)
+
+    for start in range(0, total_chunks, batch_size):
+        end = start + batch_size
+
+        batch_chunks = chunks_df.iloc[start:end]["CLEANED_CHUNK_TEXT"].tolist()
+
+        context_accumulator += "\n\n---\n\n".join(batch_chunks) + "\n\n"
+
+        answer = generate_answer(question, context_accumulator).strip()
+
+        # If LLM gives something meaningful, return early
+        if (
+            "not found" not in answer.lower()
+            and "do not contain" not in answer.lower()
+            and "cannot find" not in answer.lower()
+        ):
+            return answer
+
+    return "The documents do not contain this information."
+
 # -----------------------------------------------------------------------------
 # LOGIN SCREEN
 # -----------------------------------------------------------------------------
@@ -232,12 +264,12 @@ if prompt:
                     st.write(answer)
 
                 else:
-                    context_text = "\n\n---\n\n".join(
-                        chunks_df["CLEANED_CHUNK_TEXT"].tolist()
+                    # STEP 3 — Iterative Grounded Answer (NEW)
+                    answer = iterative_grounded_answer(
+                        prompt,
+                        chunks_df,
+                        batch_size=5
                     )
-
-                    # STEP 3 — Grounded Answer
-                    answer = generate_answer(prompt, context_text)
 
                     # STEP 4 — Role-Based Masking
                     if st.session_state.app_role not in ["admin", "owner"]:
@@ -245,7 +277,7 @@ if prompt:
 
                     st.write(answer)
 
-                    # Best Matching PDF
+                    # BEST MATCHING PDF
                     file_scores = (
                         chunks_df
                         .groupby("SOURCE_FILE")["SCORE"]
