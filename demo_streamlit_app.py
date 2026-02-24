@@ -14,12 +14,14 @@ session = get_active_session()
 STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
 
 # -----------------------------------------------------------------------------
-# Settings (UPDATED)
+# Settings (Optimized for Token Safety)
 # -----------------------------------------------------------------------------
-MODEL_NAME = "mistral-large2"  # Upgraded model
+MODEL_NAME = "mistral-large2"
 EMBED_MODEL = "snowflake-arctic-embed-m"
-SIMILARITY_THRESHOLD = 0.35    # Lowered for better name detection
-MAX_CHUNKS = 30
+
+SIMILARITY_THRESHOLD = 0.40
+MAX_CHUNKS = 8                 # Reduced for better precision
+MAX_CONTEXT_CHARS = 12000      # Hard context cap (~3k–4k tokens safe)
 
 # -----------------------------------------------------------------------------
 # Session State
@@ -69,7 +71,7 @@ def call_llm(prompt):
     return result[0]["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Masking (Improved)
+# Masking
 # -----------------------------------------------------------------------------
 def mask_answer(answer_text):
     masking_prompt = f"""
@@ -107,7 +109,7 @@ def get_presigned_url(file_name):
     return session.sql(sql).collect()[0]["URL"]
 
 # -----------------------------------------------------------------------------
-# Hybrid Search (Improved Scoring)
+# Hybrid Search
 # -----------------------------------------------------------------------------
 def call_search(query):
 
@@ -195,7 +197,6 @@ if st.sidebar.button("Logout"):
 # -----------------------------------------------------------------------------
 st.title("📄 PDF Chatbot on Snowflake")
 
-# Render Chat History
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
@@ -221,12 +222,27 @@ if prompt:
                     st.write(answer)
 
                 else:
-                    context_text = "\n\n".join(
-                        [
-                            f"[File: {row.SOURCE_FILE} | Page: {row.PAGE_NUM}]\n{row.CHUNK_TEXT}"
-                            for _, row in chunks_df.iterrows()
-                        ]
-                    )
+
+                    # ---------------------------------------------------------
+                    # SAFE CONTEXT BUILDER (12K CHAR CAP)
+                    # ---------------------------------------------------------
+                    context_parts = []
+                    current_length = 0
+
+                    for _, row in chunks_df.iterrows():
+
+                        chunk_block = (
+                            f"[File: {row.SOURCE_FILE} | Page: {row.PAGE_NUM}]\n"
+                            f"{row.CHUNK_TEXT}\n\n"
+                        )
+
+                        if current_length + len(chunk_block) > MAX_CONTEXT_CHARS:
+                            break
+
+                        context_parts.append(chunk_block)
+                        current_length += len(chunk_block)
+
+                    context_text = "".join(context_parts)
 
                     full_prompt = f"""
 You are a medical document assistant.
@@ -238,7 +254,6 @@ STRICT RULES:
 - Do NOT infer missing names.
 - Do NOT guess.
 - Preserve numeric values exactly.
-- If a patient name exists, extract it exactly as written.
 
 Context:
 {context_text}
@@ -256,7 +271,9 @@ Answer:
 
                     st.write(answer)
 
-                    # Best PDF Selection
+                    # ---------------------------------------------------------
+                    # Most Relevant File Download
+                    # ---------------------------------------------------------
                     file_scores = (
                         chunks_df
                         .groupby("SOURCE_FILE")["SCORE"]
