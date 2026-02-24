@@ -69,7 +69,7 @@ def call_llm(prompt):
     return result[0]["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Masking (for non-admin users)
+# Masking
 # -----------------------------------------------------------------------------
 def mask_answer(answer_text):
     masking_prompt = f"""
@@ -81,7 +81,7 @@ Mask ALL PII and PHI:
 - IDs
 - Phone numbers
 - Addresses
-- Lab values tied to person
+- Lab values tied to a person
 
 Replace each sensitive value with exactly: XXXXXX
 
@@ -194,7 +194,6 @@ if st.sidebar.button("Logout"):
 # -----------------------------------------------------------------------------
 st.title("📄 PDF Chatbot on Snowflake")
 
-# Chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
@@ -227,35 +226,45 @@ if prompt:
                         ]
                     )
 
-                    # STRICT EXTRACTIVE PROMPT
                     full_prompt = f"""
-You are a STRICT medical document retrieval system.
+You are a medical document assistant.
 
-CRITICAL RULES:
-1. Use ONLY exact text from context.
-2. DO NOT summarize.
-3. DO NOT explain.
-4. DO NOT infer.
-5. If exact answer not found, respond exactly:
-   "Information not found in documents."
-6. Return copied text only.
+STRICT RULES:
+- Answer using ONLY the provided context.
+- Do NOT add new medical knowledge.
+- Do NOT infer missing information.
+- If answer not clearly present, say:
+  "Information not found in documents."
+- Keep numeric values exactly as written.
 
--------------------
-CONTEXT:
+Context:
 {context_text}
--------------------
 
-QUESTION:
+Question:
 {prompt}
 
-EXTRACTED ANSWER:
+Answer:
 """
 
                     answer = call_llm(full_prompt)
 
-                    # 🚨 HARD VALIDATION LAYER (Anti-Hallucination)
-                    if answer.strip() not in context_text:
+                    # -------------------------------
+                    # Soft Anti-Hallucination Check
+                    # -------------------------------
+                    normalized_context = context_text.lower().replace("\n", " ")
+                    normalized_answer = answer.lower().strip()
+
+                    if len(normalized_answer) < 5:
                         answer = "Information not found in documents."
+                    elif normalized_answer not in normalized_context:
+                        overlap_found = False
+                        for sentence in normalized_answer.split("."):
+                            sentence = sentence.strip()
+                            if len(sentence) > 10 and sentence in normalized_context:
+                                overlap_found = True
+                                break
+                        if not overlap_found:
+                            answer = "Information not found in documents."
 
                     # Role-based masking
                     if st.session_state.app_role not in ["admin", "owner"]:
@@ -263,7 +272,7 @@ EXTRACTED ANSWER:
 
                     st.write(answer)
 
-                    # Best PDF selection
+                    # Determine best PDF
                     file_scores = (
                         chunks_df
                         .groupby("SOURCE_FILE")["SCORE"]
