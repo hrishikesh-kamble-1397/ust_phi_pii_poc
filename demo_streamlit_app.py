@@ -158,7 +158,7 @@ def call_search(query):
         )
         WHERE SCORE >= {SIMILARITY_THRESHOLD}
         ORDER BY SCORE DESC
-        LIMIT {MAX_CHUNKS}
+        --LIMIT {MAX_CHUNKS}
     """
 
     return session.sql(search_sql, params=[query]).to_pandas()
