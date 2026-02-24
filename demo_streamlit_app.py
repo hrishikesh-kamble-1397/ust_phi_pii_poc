@@ -12,33 +12,27 @@ st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
 # -----------------------------------------------------------------------------
 session = get_active_session()
 
-# -----------------------------------------------------------------------------
-# Settings
-# -----------------------------------------------------------------------------
 MODEL_NAME = "mistral-large2"
 EMBED_MODEL = "snowflake-arctic-embed-m"
 SIMILARITY_THRESHOLD = 0.35
 MAX_CHUNKS = 30
-
-PDF_TABLE = "AI_POC_DB.PII_PHI_POC.DOCS_CHUNKS_NEW"
-STRUCTURED_SCHEMA = "AI_POC_DB.SP_PII_PHI"
+PAGE_SIZE = 5  # Number of names shown before "+ More"
 
 # -----------------------------------------------------------------------------
 # Session State
 # -----------------------------------------------------------------------------
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
-
 if "username" not in st.session_state:
     st.session_state.username = None
-
 if "app_role" not in st.session_state:
     st.session_state.app_role = None
-
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "Ask me anything about your PDFs and structured data."}
+        {"role": "assistant", "content": "Ask me anything about your PDFs."}
     ]
+if "entity_offset" not in st.session_state:
+    st.session_state.entity_offset = 0
 
 # -----------------------------------------------------------------------------
 # Authentication
@@ -47,21 +41,17 @@ def authenticate_user(user_name, password):
     df = session.sql("""
         SELECT APP_ROLE
         FROM AI_POC_DB.PII_PHI_POC.APP_USER_ACCESS
-        WHERE (
-            UPPER(USER_NAME) = UPPER(:1)
-            OR UPPER(USER_NAME) = SPLIT(UPPER(:1), '@')[0]
-        )
+        WHERE UPPER(USER_NAME) = UPPER(:1)
         AND PASSWORD = :2
         AND IS_ACTIVE = TRUE
     """, [user_name, password]).to_pandas()
 
     if df.empty:
         return None
-
     return df.iloc[0]["APP_ROLE"].lower()
 
 # -----------------------------------------------------------------------------
-# LLM Call
+# LLM
 # -----------------------------------------------------------------------------
 def call_llm(prompt):
     sql = "SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER"
@@ -69,115 +59,87 @@ def call_llm(prompt):
     return result[0]["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Fetch PDF Chunks
+# AUTO FETCH + JOIN ALL TABLES WITH PATIENT_ID
 # -----------------------------------------------------------------------------
-def fetch_pdf_chunks():
-    return session.sql(f"""
-        SELECT CHUNK_TEXT
-        FROM {PDF_TABLE}
+def fetch_joined_tables():
+
+    tables_df = session.sql("""
+        SHOW TABLES IN SCHEMA AI_POC_DB.SP_PII_PHI
     """).to_pandas()
 
-# -----------------------------------------------------------------------------
-# Fetch ALL Tables from Structured Schema
-# -----------------------------------------------------------------------------
-def fetch_structured_tables_text():
+    table_names = tables_df["name"].tolist()
 
-    tables = session.sql(f"""
-        SHOW TABLES IN {STRUCTURED_SCHEMA}
-    """).to_pandas()
+    valid_tables = []
 
-    combined_text = ""
+    for table in table_names:
+        cols = session.sql(f"""
+            SHOW COLUMNS IN TABLE AI_POC_DB.SP_PII_PHI.{table}
+        """).to_pandas()
 
-    for table in tables["name"]:
-        full_table_name = f"{STRUCTURED_SCHEMA}.{table}"
+        col_list = [c.upper() for c in cols["column_name"].tolist()]
 
-        try:
-            df = session.sql(f"SELECT * FROM {full_table_name}").to_pandas()
-            combined_text += f"\n\nTable: {table}\n"
-            combined_text += df.to_string(index=False)
-        except:
-            continue
+        if "PATIENT_ID" in col_list:
+            valid_tables.append(table)
 
-    return combined_text
+    if not valid_tables:
+        return pd.DataFrame()
 
-# -----------------------------------------------------------------------------
-# Combined Context
-# -----------------------------------------------------------------------------
-def fetch_combined_context():
-    pdf_df = fetch_pdf_chunks()
-    pdf_text = "\n".join(pdf_df["CHUNK_TEXT"].tolist())
+    # Build Dynamic Join Query
+    base_table = valid_tables[0]
+    join_query = f"SELECT * FROM AI_POC_DB.SP_PII_PHI.{base_table} t0 "
 
-    structured_text = fetch_structured_tables_text()
+    for idx, table in enumerate(valid_tables[1:], start=1):
+        join_query += f"""
+            LEFT JOIN AI_POC_DB.SP_PII_PHI.{table} t{idx}
+            ON t0.PATIENT_ID = t{idx}.PATIENT_ID
+        """
 
-    return pdf_text + "\n\n" + structured_text
+    return session.sql(join_query).to_pandas()
 
 # -----------------------------------------------------------------------------
-# Extract Entities
+# Extract Entities from Joined Data
 # -----------------------------------------------------------------------------
 def extract_entities(entity_type):
 
-    full_text = fetch_combined_context()
+    df = fetch_joined_tables()
+    if df.empty:
+        return []
+
+    text_blob = df.astype(str).agg(" ".join, axis=1).str.cat(sep="\n")
 
     prompt = f"""
-Extract unique {entity_type} names.
-
+Extract unique {entity_type} names from the text.
 Only return names where complete detailed information exists.
 Return comma separated list only.
 
 Text:
-{full_text}
+{text_blob}
 """
 
     response = call_llm(prompt)
     names = [x.strip() for x in response.split(",") if len(x.strip()) > 2]
-    return list(set(names))
+    return list(dict.fromkeys(names))  # remove duplicates, keep order
 
 # -----------------------------------------------------------------------------
-# Get Full Details
+# Get Full Details from Joined Tables
 # -----------------------------------------------------------------------------
 def get_full_details(name, entity_type):
 
-    full_text = fetch_combined_context()
+    df = fetch_joined_tables()
+    if df.empty:
+        return ""
+
+    text_blob = df.astype(str).agg(" ".join, axis=1).str.cat(sep="\n")
 
     prompt = f"""
 Provide complete detailed information about {entity_type} named {name}.
-Use only provided text.
 If insufficient data, return NOTHING.
+Use only provided text.
 
 Text:
-{full_text}
+{text_blob}
 """
-
     return call_llm(prompt)
-
-# -----------------------------------------------------------------------------
-# Hybrid Search (PDF only for vector search)
-# -----------------------------------------------------------------------------
-def call_search(query):
-
-    search_sql = f"""
-        WITH query_vec AS (
-            SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_768(
-                '{EMBED_MODEL}',
-                ?
-            ) AS emb
-        ),
-        vector_results AS (
-            SELECT
-                c.CHUNK_TEXT,
-                VECTOR_COSINE_SIMILARITY(c.EMBEDDING, q.emb) AS SCORE
-            FROM {PDF_TABLE} c
-            CROSS JOIN query_vec q
-            WHERE c.EMBEDDING IS NOT NULL
-        )
-        SELECT *
-        FROM vector_results
-        WHERE SCORE >= {SIMILARITY_THRESHOLD}
-        ORDER BY SCORE DESC
-        LIMIT {MAX_CHUNKS}
-    """
-
-    return session.sql(search_sql, params=[query]).to_pandas()
 
 # -----------------------------------------------------------------------------
 # LOGIN
@@ -193,7 +155,6 @@ if not st.session_state.authenticated:
 
     if login_btn:
         role = authenticate_user(login_user, login_password)
-
         if not role:
             st.error("Invalid credentials")
             st.stop()
@@ -217,86 +178,82 @@ if st.sidebar.button("Logout"):
     st.rerun()
 
 # -----------------------------------------------------------------------------
-# ADMIN / OWNER ENTITY VIEW
+# ADMIN / OWNER ENTITY VIEW WITH "+ MORE"
 # -----------------------------------------------------------------------------
 if st.session_state.app_role in ["admin", "owner"]:
 
     st.sidebar.markdown("---")
-    sidebar_tab = st.sidebar.radio(
+
+    category = st.sidebar.radio(
         "Select Category",
         ["Patients Details", "Doctor Details"]
     )
 
-    if sidebar_tab == "Patients Details":
-        patient_names = extract_entities("patient")
+    entity_type = "patient" if category == "Patients Details" else "doctor"
+    names = extract_entities(entity_type)
 
-        for name in patient_names:
-            if st.sidebar.button(name, key=f"patient_{name}"):
+    start = st.session_state.entity_offset
+    end = start + PAGE_SIZE
+    visible_names = names[start:end]
 
-                details = get_full_details(name, "patient")
+    for name in visible_names:
+        if st.sidebar.button(name, key=f"{entity_type}_{name}"):
 
-                if details.strip():
-                    st.session_state.messages = []
-                    st.session_state.messages.append(
-                        {"role": "user", "content": f"Show complete details of patient {name}"}
-                    )
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": details}
-                    )
+            details = get_full_details(name, entity_type)
+            if details.strip():
+                st.session_state.messages = []
+                st.session_state.messages.append(
+                    {"role": "user", "content": f"Show complete details of {entity_type} {name}"}
+                )
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": details}
+                )
 
-    if sidebar_tab == "Doctor Details":
-        doctor_names = extract_entities("doctor")
-
-        for name in doctor_names:
-            if st.sidebar.button(name, key=f"doctor_{name}"):
-
-                details = get_full_details(name, "doctor")
-
-                if details.strip():
-                    st.session_state.messages = []
-                    st.session_state.messages.append(
-                        {"role": "user", "content": f"Show complete details of doctor {name}"}
-                    )
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": details}
-                    )
+    if end < len(names):
+        if st.sidebar.button("+ More"):
+            st.session_state.entity_offset += PAGE_SIZE
+            st.rerun()
 
 # -----------------------------------------------------------------------------
 # MAIN CHAT
 # -----------------------------------------------------------------------------
-st.title("📄 PDF + Structured Data Chatbot")
+st.title("📄 PDF Chatbot on Snowflake")
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
 
-prompt = st.chat_input("Ask about PDFs or structured tables")
+prompt = st.chat_input("Ask about your PDFs")
 
 if prompt:
-
     st.session_state.messages.append({"role": "user", "content": prompt})
 
     with st.chat_message("assistant"):
+        with st.spinner("Analyzing..."):
+            joined_df = fetch_joined_tables()
 
-        full_text = fetch_combined_context()
+            if joined_df.empty:
+                answer = "Information not found in documents."
+            else:
+                text_blob = joined_df.astype(str).agg(" ".join, axis=1).str.cat(sep="\n")
 
-        full_prompt = f"""
-Use ONLY provided data.
+                full_prompt = f"""
+Use only the following data.
 If answer not present, say:
 "Information not found in documents."
 
 Data:
-{full_text}
+{text_blob}
 
 Question:
 {prompt}
 
 Answer:
 """
+                answer = call_llm(full_prompt)
 
-        answer = call_llm(full_prompt)
-        st.write(answer)
+            st.write(answer)
 
-        st.session_state.messages.append(
-            {"role": "assistant", "content": answer}
-        )
+            st.session_state.messages.append(
+                {"role": "assistant", "content": answer}
+            )
