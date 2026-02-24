@@ -3,7 +3,7 @@ import pandas as pd
 from snowflake.snowpark.context import get_active_session
 
 # -----------------------------------------------------------------------------
-# App Configuration
+# App Config
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
 
@@ -113,7 +113,7 @@ def call_search(query):
     return session.sql(search_sql, params=[query]).to_pandas()
 
 # -----------------------------------------------------------------------------
-# Fetch All Chunks (Used for Sidebar LLM Extraction)
+# Fetch All Chunks
 # -----------------------------------------------------------------------------
 def fetch_all_chunks():
     return session.sql("""
@@ -122,18 +122,17 @@ def fetch_all_chunks():
     """).to_pandas()
 
 # -----------------------------------------------------------------------------
-# Extract Names Using LLM
+# Extract Names
 # -----------------------------------------------------------------------------
 def extract_entities(entity_type):
     df = fetch_all_chunks()
     full_text = "\n".join(df["CHUNK_TEXT"].tolist())
 
     prompt = f"""
-Extract unique {entity_type} names from the text below.
+Extract unique {entity_type} names from the text.
 
-Only return names where full detailed information exists.
-Return names as comma separated list.
-Do not explain.
+Only return names where complete detailed information exists.
+Return comma separated list only.
 
 Text:
 {full_text}
@@ -152,7 +151,7 @@ def get_full_details(name, entity_type):
 
     prompt = f"""
 Provide complete detailed information about {entity_type} named {name}.
-Use only given text.
+Use only provided text.
 If insufficient data, return NOTHING.
 
 Text:
@@ -199,7 +198,7 @@ if st.sidebar.button("Logout"):
     st.rerun()
 
 # -----------------------------------------------------------------------------
-# ADMIN / OWNER SIDEBAR TABS
+# ADMIN / OWNER ENTITY VIEW (ChatGPT Style)
 # -----------------------------------------------------------------------------
 if st.session_state.app_role in ["admin", "owner"]:
 
@@ -214,22 +213,36 @@ if st.session_state.app_role in ["admin", "owner"]:
 
         for name in patient_names:
             if st.sidebar.button(name, key=f"patient_{name}"):
+
                 details = get_full_details(name, "patient")
+
                 if details.strip():
                     st.session_state.messages = []
-                    st.title(f"Patient: {name}")
-                    st.write(details)
+
+                    st.session_state.messages.append(
+                        {"role": "user", "content": f"Show complete details of patient {name}"}
+                    )
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": details}
+                    )
 
     if sidebar_tab == "Doctor Details":
         doctor_names = extract_entities("doctor")
 
         for name in doctor_names:
             if st.sidebar.button(name, key=f"doctor_{name}"):
+
                 details = get_full_details(name, "doctor")
+
                 if details.strip():
                     st.session_state.messages = []
-                    st.title(f"Doctor: {name}")
-                    st.write(details)
+
+                    st.session_state.messages.append(
+                        {"role": "user", "content": f"Show complete details of doctor {name}"}
+                    )
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": details}
+                    )
 
 # -----------------------------------------------------------------------------
 # MAIN CHAT APPLICATION
@@ -258,7 +271,6 @@ if prompt:
 
                 if chunks_df.empty:
                     answer = "Information not found in documents."
-                    st.write(answer)
                 else:
                     context_text = "\n\n".join(
                         [
@@ -285,7 +297,7 @@ Answer:
                     if st.session_state.app_role not in ["admin", "owner"]:
                         answer = mask_answer(answer)
 
-                    st.write(answer)
+                st.write(answer)
 
                 st.session_state.messages.append(
                     {"role": "assistant", "content": answer}
