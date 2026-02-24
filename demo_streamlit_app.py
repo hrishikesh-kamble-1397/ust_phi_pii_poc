@@ -14,11 +14,11 @@ session = get_active_session()
 STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
 
 # -----------------------------------------------------------------------------
-# Settings (UPDATED)
+# Settings
 # -----------------------------------------------------------------------------
-MODEL_NAME = "mistral-large2"  # Upgraded model
+MODEL_NAME = "mistral-large2"
 EMBED_MODEL = "snowflake-arctic-embed-m"
-SIMILARITY_THRESHOLD = 0.35    # Lowered for better name detection
+SIMILARITY_THRESHOLD = 0.35
 MAX_CHUNKS = 30
 
 # -----------------------------------------------------------------------------
@@ -69,24 +69,23 @@ def call_llm(prompt):
     return result[0]["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Masking (Improved)
+# Masking (for non-admin users)
 # -----------------------------------------------------------------------------
 def mask_answer(answer_text):
     masking_prompt = f"""
-You are a compliance assistant.
+You are a compliance engine.
 
-Mask ALL PII and PHI including:
+Mask ALL PII and PHI:
 - Names
-- Dates of birth
-- Addresses
-- Phone numbers
+- Dates
 - IDs
-- Lab values tied to a person
-- Any identifiable patient information
+- Phone numbers
+- Addresses
+- Lab values tied to person
 
 Replace each sensitive value with exactly: XXXXXX
 
-Return only masked text.
+Return ONLY masked text.
 
 Text:
 {answer_text}
@@ -107,7 +106,7 @@ def get_presigned_url(file_name):
     return session.sql(sql).collect()[0]["URL"]
 
 # -----------------------------------------------------------------------------
-# Hybrid Search (Improved Scoring)
+# Hybrid Search
 # -----------------------------------------------------------------------------
 def call_search(query):
 
@@ -195,7 +194,7 @@ if st.sidebar.button("Logout"):
 # -----------------------------------------------------------------------------
 st.title("📄 PDF Chatbot on Snowflake")
 
-# Render Chat History
+# Chat history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
@@ -228,35 +227,43 @@ if prompt:
                         ]
                     )
 
+                    # STRICT EXTRACTIVE PROMPT
                     full_prompt = f"""
-You are a medical document assistant.
+You are a STRICT medical document retrieval system.
 
-STRICT RULES:
-- Use ONLY the provided context.
-- If answer not explicitly present, say:
-  "Information not found in documents."
-- Do NOT infer missing names.
-- Do NOT guess.
-- Preserve numeric values exactly.
-- If a patient name exists, extract it exactly as written.
+CRITICAL RULES:
+1. Use ONLY exact text from context.
+2. DO NOT summarize.
+3. DO NOT explain.
+4. DO NOT infer.
+5. If exact answer not found, respond exactly:
+   "Information not found in documents."
+6. Return copied text only.
 
-Context:
+-------------------
+CONTEXT:
 {context_text}
+-------------------
 
-Question:
+QUESTION:
 {prompt}
 
-Answer:
+EXTRACTED ANSWER:
 """
 
                     answer = call_llm(full_prompt)
 
+                    # 🚨 HARD VALIDATION LAYER (Anti-Hallucination)
+                    if answer.strip() not in context_text:
+                        answer = "Information not found in documents."
+
+                    # Role-based masking
                     if st.session_state.app_role not in ["admin", "owner"]:
                         answer = mask_answer(answer)
 
                     st.write(answer)
 
-                    # Best PDF Selection
+                    # Best PDF selection
                     file_scores = (
                         chunks_df
                         .groupby("SOURCE_FILE")["SCORE"]
