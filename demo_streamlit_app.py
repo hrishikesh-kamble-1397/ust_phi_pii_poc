@@ -16,7 +16,7 @@ MODEL_NAME = "mistral-large2"
 EMBED_MODEL = "snowflake-arctic-embed-m"
 SIMILARITY_THRESHOLD = 0.35
 MAX_CHUNKS = 30
-PAGE_SIZE = 5  # Number of names shown before "+ More"
+PAGE_SIZE = 5  # names per batch in sidebar
 
 # -----------------------------------------------------------------------------
 # Session State
@@ -59,40 +59,37 @@ def call_llm(prompt):
     return result[0]["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# AUTO FETCH + JOIN ALL TABLES WITH PATIENT_ID
+# AUTO FETCH + JOIN ALL TABLES WITH PATIENT_ID (FIXED)
 # -----------------------------------------------------------------------------
 def fetch_joined_tables():
+    tables_df = session.sql("SHOW TABLES IN SCHEMA AI_POC_DB.SP_PII_PHI").to_pandas()
+    if tables_df.empty:
+        return pd.DataFrame()
 
-    tables_df = session.sql("""
-        SHOW TABLES IN SCHEMA AI_POC_DB.SP_PII_PHI
-    """).to_pandas()
-
-    table_names = tables_df["name"].tolist()
+    # Ensure uppercase column names
+    tables_df.columns = tables_df.columns.str.upper()
+    table_names = tables_df["NAME"].tolist()
 
     valid_tables = []
 
     for table in table_names:
-        cols = session.sql(f"""
-            SHOW COLUMNS IN TABLE AI_POC_DB.SP_PII_PHI.{table}
-        """).to_pandas()
-
-        col_list = [c.upper() for c in cols["column_name"].tolist()]
-
+        cols_df = session.sql(f"SHOW COLUMNS IN TABLE AI_POC_DB.SP_PII_PHI.{table}").to_pandas()
+        if cols_df.empty:
+            continue
+        cols_df.columns = cols_df.columns.str.upper()
+        col_list = [c.upper() for c in cols_df["COLUMN_NAME"].tolist()]
         if "PATIENT_ID" in col_list:
             valid_tables.append(table)
 
     if not valid_tables:
         return pd.DataFrame()
 
-    # Build Dynamic Join Query
+    # Build dynamic join query
     base_table = valid_tables[0]
     join_query = f"SELECT * FROM AI_POC_DB.SP_PII_PHI.{base_table} t0 "
 
     for idx, table in enumerate(valid_tables[1:], start=1):
-        join_query += f"""
-            LEFT JOIN AI_POC_DB.SP_PII_PHI.{table} t{idx}
-            ON t0.PATIENT_ID = t{idx}.PATIENT_ID
-        """
+        join_query += f"LEFT JOIN AI_POC_DB.SP_PII_PHI.{table} t{idx} ON t0.PATIENT_ID = t{idx}.PATIENT_ID "
 
     return session.sql(join_query).to_pandas()
 
@@ -100,7 +97,6 @@ def fetch_joined_tables():
 # Extract Entities from Joined Data
 # -----------------------------------------------------------------------------
 def extract_entities(entity_type):
-
     df = fetch_joined_tables()
     if df.empty:
         return []
@@ -115,16 +111,14 @@ Return comma separated list only.
 Text:
 {text_blob}
 """
-
     response = call_llm(prompt)
     names = [x.strip() for x in response.split(",") if len(x.strip()) > 2]
-    return list(dict.fromkeys(names))  # remove duplicates, keep order
+    return list(dict.fromkeys(names))  # remove duplicates
 
 # -----------------------------------------------------------------------------
-# Get Full Details from Joined Tables
+# Get Full Details
 # -----------------------------------------------------------------------------
 def get_full_details(name, entity_type):
-
     df = fetch_joined_tables()
     if df.empty:
         return ""
@@ -145,25 +139,20 @@ Text:
 # LOGIN
 # -----------------------------------------------------------------------------
 if not st.session_state.authenticated:
-
     st.title("🔐 Chatbot Login")
-
     with st.form("login_form"):
         login_user = st.text_input("Username", placeholder="e.g. Vedant")
         login_password = st.text_input("Password", type="password")
         login_btn = st.form_submit_button("Login")
-
     if login_btn:
         role = authenticate_user(login_user, login_password)
         if not role:
             st.error("Invalid credentials")
             st.stop()
-
         st.session_state.authenticated = True
         st.session_state.username = login_user
         st.session_state.app_role = role
         st.rerun()
-
     st.stop()
 
 # -----------------------------------------------------------------------------
@@ -181,24 +170,17 @@ if st.sidebar.button("Logout"):
 # ADMIN / OWNER ENTITY VIEW WITH "+ MORE"
 # -----------------------------------------------------------------------------
 if st.session_state.app_role in ["admin", "owner"]:
-
     st.sidebar.markdown("---")
-
-    category = st.sidebar.radio(
-        "Select Category",
-        ["Patients Details", "Doctor Details"]
-    )
-
+    category = st.sidebar.radio("Select Category", ["Patients Details", "Doctor Details"])
     entity_type = "patient" if category == "Patients Details" else "doctor"
-    names = extract_entities(entity_type)
 
+    names = extract_entities(entity_type)
     start = st.session_state.entity_offset
     end = start + PAGE_SIZE
     visible_names = names[start:end]
 
     for name in visible_names:
         if st.sidebar.button(name, key=f"{entity_type}_{name}"):
-
             details = get_full_details(name, entity_type)
             if details.strip():
                 st.session_state.messages = []
@@ -231,12 +213,10 @@ if prompt:
     with st.chat_message("assistant"):
         with st.spinner("Analyzing..."):
             joined_df = fetch_joined_tables()
-
             if joined_df.empty:
                 answer = "Information not found in documents."
             else:
                 text_blob = joined_df.astype(str).agg(" ".join, axis=1).str.cat(sep="\n")
-
                 full_prompt = f"""
 Use only the following data.
 If answer not present, say:
@@ -253,7 +233,4 @@ Answer:
                 answer = call_llm(full_prompt)
 
             st.write(answer)
-
-            st.session_state.messages.append(
-                {"role": "assistant", "content": answer}
-            )
+            st.session_state.messages.append({"role": "assistant", "content": answer})
