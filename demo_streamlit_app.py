@@ -11,14 +11,13 @@ st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
 # Snowflake Session
 # -----------------------------------------------------------------------------
 session = get_active_session()
-STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
 
 # -----------------------------------------------------------------------------
-# Settings (UPDATED)
+# Settings
 # -----------------------------------------------------------------------------
-MODEL_NAME = "mistral-large2"  # Upgraded model
+MODEL_NAME = "mistral-large2"
 EMBED_MODEL = "snowflake-arctic-embed-m"
-SIMILARITY_THRESHOLD = 0.35    # Lowered for better name detection
+SIMILARITY_THRESHOLD = 0.35
 MAX_CHUNKS = 30
 
 # -----------------------------------------------------------------------------
@@ -69,7 +68,7 @@ def call_llm(prompt):
     return result[0]["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Masking (Improved)
+# Masking
 # -----------------------------------------------------------------------------
 def mask_answer(answer_text):
     masking_prompt = f"""
@@ -94,20 +93,7 @@ Text:
     return call_llm(masking_prompt)
 
 # -----------------------------------------------------------------------------
-# Presigned URL
-# -----------------------------------------------------------------------------
-def get_presigned_url(file_name):
-    sql = f"""
-        SELECT GET_PRESIGNED_URL(
-            @{STAGE_NAME},
-            '{file_name}',
-            3600
-        ) AS URL
-    """
-    return session.sql(sql).collect()[0]["URL"]
-
-# -----------------------------------------------------------------------------
-# Hybrid Search (Improved Scoring)
+# Hybrid Search
 # -----------------------------------------------------------------------------
 def call_search(query):
 
@@ -255,26 +241,6 @@ Answer:
                         answer = mask_answer(answer)
 
                     st.write(answer)
-
-                    # Best PDF Selection
-                    file_scores = (
-                        chunks_df
-                        .groupby("SOURCE_FILE")["SCORE"]
-                        .max()
-                        .reset_index()
-                        .sort_values("SCORE", ascending=False)
-                    )
-
-                    best_file = file_scores.iloc[0]["SOURCE_FILE"]
-                    best_score = file_scores.iloc[0]["SCORE"]
-
-                    if best_score >= SIMILARITY_THRESHOLD:
-                        st.markdown("### 📥 Most Relevant PDF")
-                        url = get_presigned_url(best_file)
-                        st.link_button(
-                            f"Download {best_file} (Score: {best_score:.3f})",
-                            url
-                        )
 
                 st.session_state.messages.append(
                     {"role": "assistant", "content": answer}
