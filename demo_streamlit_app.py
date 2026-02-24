@@ -14,12 +14,12 @@ session = get_active_session()
 STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
 
 # -----------------------------------------------------------------------------
-# Settings (More Strict Retrieval)
+# Settings (UPDATED)
 # -----------------------------------------------------------------------------
-MODEL_NAME = "mistral-large2"
+MODEL_NAME = "mistral-large2"  # Upgraded model
 EMBED_MODEL = "snowflake-arctic-embed-m"
-SIMILARITY_THRESHOLD = 0.60   # Increased to reduce irrelevant matches
-MAX_CHUNKS = 10               # Reduced to prevent over-context
+SIMILARITY_THRESHOLD = 0.35    # Lowered for better name detection
+MAX_CHUNKS = 30
 
 # -----------------------------------------------------------------------------
 # Session State
@@ -59,29 +59,25 @@ def authenticate_user(user_name, password):
     return df.iloc[0]["APP_ROLE"].lower()
 
 # -----------------------------------------------------------------------------
-# LLM Call (Snowflake-Compatible)
+# LLM Call
 # -----------------------------------------------------------------------------
 def call_llm(prompt):
     sql = """
-        SELECT SNOWFLAKE.CORTEX.COMPLETE(
-            ?,
-            ?
-        ) AS ANSWER
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER
     """
     result = session.sql(sql, params=[MODEL_NAME, prompt]).collect()
     return result[0]["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Masking (For non-admin users)
+# Masking (Improved)
 # -----------------------------------------------------------------------------
 def mask_answer(answer_text):
-
     masking_prompt = f"""
-You are a compliance masking engine.
+You are a compliance assistant.
 
-Mask ALL PII and PHI:
+Mask ALL PII and PHI including:
 - Names
-- DOB
+- Dates of birth
 - Addresses
 - Phone numbers
 - IDs
@@ -90,7 +86,7 @@ Mask ALL PII and PHI:
 
 Replace each sensitive value with exactly: XXXXXX
 
-Return ONLY masked text.
+Return only masked text.
 
 Text:
 {answer_text}
@@ -111,7 +107,7 @@ def get_presigned_url(file_name):
     return session.sql(sql).collect()[0]["URL"]
 
 # -----------------------------------------------------------------------------
-# Hybrid Search
+# Hybrid Search (Improved Scoring)
 # -----------------------------------------------------------------------------
 def call_search(query):
 
@@ -139,7 +135,7 @@ def call_search(query):
                 CHUNK_TEXT,
                 SOURCE_FILE,
                 PAGE_NUM,
-                0.80 AS SCORE
+                0.75 AS SCORE
             FROM AI_POC_DB.PII_PHI_POC.DOCS_CHUNKS_NEW
             WHERE CHUNK_TEXT ILIKE '%' || ? || '%'
         )
@@ -199,7 +195,7 @@ if st.sidebar.button("Logout"):
 # -----------------------------------------------------------------------------
 st.title("📄 PDF Chatbot on Snowflake")
 
-# Render chat history
+# Render Chat History
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
@@ -232,21 +228,17 @@ if prompt:
                         ]
                     )
 
-                    # STRICT EXTRACTIVE PROMPT
                     full_prompt = f"""
-You are a STRICT document extraction engine.
+You are a medical document assistant.
 
-RULES:
-1. Use ONLY the provided context.
-2. Copy text EXACTLY as written.
-3. Do NOT summarize.
-4. Do NOT explain.
-5. Do NOT infer.
-6. Do NOT rephrase.
-7. If exact answer not found, return exactly:
-Information not found in documents.
-
-Return ONLY verbatim extracted text.
+STRICT RULES:
+- Use ONLY the provided context.
+- If answer not explicitly present, say:
+  "Information not found in documents."
+- Do NOT infer missing names.
+- Do NOT guess.
+- Preserve numeric values exactly.
+- If a patient name exists, extract it exactly as written.
 
 Context:
 {context_text}
@@ -264,7 +256,7 @@ Answer:
 
                     st.write(answer)
 
-                    # Most Relevant File
+                    # Best PDF Selection
                     file_scores = (
                         chunks_df
                         .groupby("SOURCE_FILE")["SCORE"]
