@@ -18,11 +18,11 @@ STAGE_NAME = "AI_POC_DB.PII_PHI_POC.PHI_PII_POC_STAGE1"
 # -----------------------------------------------------------------------------
 MODEL_NAME = "llama3.1-70b"
 EMBED_MODEL = "snowflake-arctic-embed-m"
-SIMILARITY_THRESHOLD = 0.70
-MAX_CHUNKS = 20
+SIMILARITY_THRESHOLD = 0.50
+MAX_CHUNKS = 30
 
 # -----------------------------------------------------------------------------
-# Session State Initialization
+# Session State
 # -----------------------------------------------------------------------------
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
@@ -69,7 +69,7 @@ def call_llm(prompt):
     return result[0]["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Masking Function
+# Masking
 # -----------------------------------------------------------------------------
 def mask_answer(answer_text):
     masking_prompt = f"""
@@ -96,7 +96,7 @@ def get_presigned_url(file_name):
     return session.sql(sql).collect()[0]["URL"]
 
 # -----------------------------------------------------------------------------
-# Vector Search (FIXED - No QUALIFY)
+# Hybrid Search (Vector + Keyword)
 # -----------------------------------------------------------------------------
 def call_search(query):
 
@@ -106,9 +106,9 @@ def call_search(query):
                 '{EMBED_MODEL}',
                 ?
             ) AS emb
-        )
-        SELECT *
-        FROM (
+        ),
+
+        vector_results AS (
             SELECT
                 c.CHUNK_TEXT,
                 c.SOURCE_FILE,
@@ -117,13 +117,30 @@ def call_search(query):
             FROM AI_POC_DB.PII_PHI_POC.DOCS_CHUNKS_NEW c
             CROSS JOIN query_vec q
             WHERE c.EMBEDDING IS NOT NULL
+        ),
+
+        keyword_results AS (
+            SELECT
+                CHUNK_TEXT,
+                SOURCE_FILE,
+                PAGE_NUM,
+                1.0 AS SCORE
+            FROM AI_POC_DB.PII_PHI_POC.DOCS_CHUNKS_NEW
+            WHERE CHUNK_TEXT ILIKE '%' || ? || '%'
+        )
+
+        SELECT *
+        FROM (
+            SELECT * FROM vector_results
+            UNION ALL
+            SELECT * FROM keyword_results
         )
         WHERE SCORE >= {SIMILARITY_THRESHOLD}
         ORDER BY SCORE DESC
         LIMIT {MAX_CHUNKS}
     """
 
-    return session.sql(search_sql, params=[query]).to_pandas()
+    return session.sql(search_sql, params=[query, query]).to_pandas()
 
 # -----------------------------------------------------------------------------
 # LOGIN SCREEN
@@ -193,7 +210,7 @@ if prompt:
                     st.write(answer)
 
                 else:
-                    # Build structured context
+                    # Build context
                     context_text = "\n\n".join(
                         [
                             f"[File: {row.SOURCE_FILE} | Page: {row.PAGE_NUM}]\n{row.CHUNK_TEXT}"
@@ -221,15 +238,12 @@ Answer:
 
                     answer = call_llm(full_prompt)
 
-                    # Mask if not admin/owner
                     if st.session_state.app_role not in ["admin", "owner"]:
                         answer = mask_answer(answer)
 
                     st.write(answer)
 
-                    # -------------------------
-                    # Best PDF Selection
-                    # -------------------------
+                    # Determine best PDF
                     file_scores = (
                         chunks_df
                         .groupby("SOURCE_FILE")["SCORE"]
