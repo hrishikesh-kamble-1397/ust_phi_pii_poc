@@ -66,7 +66,6 @@ def generate_sql(question):
 You are an expert Snowflake SQL developer.
 
 Database schema:
-
 {schema_info}
 
 Generate SQL to answer the question.
@@ -75,21 +74,26 @@ Rules:
 - Use only tables provided above
 - Use joins if needed
 - Return only SQL
-- Do not explain anything
 
 Question:
 {question}
 """
 
-    sql = session.sql(f"""
+    result = session.sql(f"""
     SELECT SNOWFLAKE.CORTEX.COMPLETE(
         'llama3.1-70b',
         $$ {prompt} $$
-    ) AS RESPONSE
-    """).collect()[0]["RESPONSE"]
+    )
+    """).collect()
+
+    sql = result[0][0]
+
+    if sql is None:
+        return "SELECT 'Unable to generate SQL'"
+
+    sql = sql.replace("```sql","").replace("```","").strip()
 
     return sql
-
 
 # -----------------------------------------------------------------------------
 # Validate SQL
