@@ -22,7 +22,7 @@ def get_schema():
         table_schema,
         table_name,
         column_name
-    FROM INFORMATION_SCHEMA.COLUMNS
+    FROM AI_POC_DB.INFORMATION_SCHEMA.COLUMNS
     WHERE table_schema NOT IN ('INFORMATION_SCHEMA')
     ORDER BY table_schema, table_name
     """
