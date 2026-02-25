@@ -1,315 +1,199 @@
 import streamlit as st
 import pandas as pd
+import re
 from snowflake.snowpark.context import get_active_session
 
 # -----------------------------------------------------------------------------
-# App Configuration
+# Streamlit Config
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
+st.set_page_config(page_title="AI Database Chatbot", layout="wide")
+st.title("🤖 AI Database Chatbot (Auto Schema Discovery)")
 
-# -----------------------------------------------------------------------------
-# Snowflake Session
-# -----------------------------------------------------------------------------
 session = get_active_session()
 
 # -----------------------------------------------------------------------------
-# Settings
+# Get Database Schema Automatically
 # -----------------------------------------------------------------------------
-MODEL_NAME = "mistral-large2"
-EMBED_MODEL = "snowflake-arctic-embed-m"
-SIMILARITY_THRESHOLD = 0.35
-MAX_CHUNKS = 30
+@st.cache_data
+def get_schema():
 
-# -----------------------------------------------------------------------------
-# Session State
-# -----------------------------------------------------------------------------
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-
-if "username" not in st.session_state:
-    st.session_state.username = None
-
-if "app_role" not in st.session_state:
-    st.session_state.app_role = None
-
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "Ask me anything about your PDFs."}
-    ]
-
-# -----------------------------------------------------------------------------
-# Authentication
-# -----------------------------------------------------------------------------
-def authenticate_user(user_name, password):
-    df = session.sql("""
-        SELECT APP_ROLE
-        FROM AI_POC_DB.PII_PHI_POC.APP_USER_ACCESS
-        WHERE (
-            UPPER(USER_NAME) = UPPER(:1)
-            OR UPPER(USER_NAME) = SPLIT(UPPER(:1), '@')[0]
-        )
-        AND PASSWORD = :2
-        AND IS_ACTIVE = TRUE
-    """, [user_name, password]).to_pandas()
-
-    if df.empty:
-        return None
-
-    return df.iloc[0]["APP_ROLE"].lower()
-
-# -----------------------------------------------------------------------------
-# LLM Call
-# -----------------------------------------------------------------------------
-def call_llm(prompt):
-    sql = """
-        SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER
-    """
-    result = session.sql(sql, params=[MODEL_NAME, prompt]).collect()
-    return result[0]["ANSWER"]
-
-# -----------------------------------------------------------------------------
-# Masking
-# -----------------------------------------------------------------------------
-def mask_answer(answer_text):
-    masking_prompt = f"""
-Mask ALL PII and PHI.
-Replace sensitive values with: XXXXXX
-Return only masked text.
-Do NOT invent or add any new information. Only mask what's present.
-
-Text:
-{answer_text}
-"""
-    return call_llm(masking_prompt)
-
-# -----------------------------------------------------------------------------
-# Hybrid Search
-# -----------------------------------------------------------------------------
-def call_search(query):
-
-    search_sql = f"""
-        WITH query_vec AS (
-            SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_768(
-                '{EMBED_MODEL}',
-                ?
-            ) AS emb
-        ),
-        vector_results AS (
-            SELECT
-                c.CHUNK_TEXT,
-                c.SOURCE_FILE,
-                c.PAGE_NUM,
-                VECTOR_COSINE_SIMILARITY(c.EMBEDDING, q.emb) AS SCORE
-            FROM AI_POC_DB.PII_PHI_POC.DOCS_CHUNKS_NEW c
-            CROSS JOIN query_vec q
-            WHERE c.EMBEDDING IS NOT NULL
-        )
-        SELECT *
-        FROM vector_results
-        WHERE SCORE >= {SIMILARITY_THRESHOLD}
-        ORDER BY SCORE DESC
-        LIMIT {MAX_CHUNKS}
+    query = """
+    SELECT
+        TABLE_NAME,
+        COLUMN_NAME,
+        DATA_TYPE
+    FROM INFORMATION_SCHEMA.COLUMNS
+    ORDER BY TABLE_NAME
     """
 
-    return session.sql(search_sql, params=[query]).to_pandas()
+    df = session.sql(query).to_pandas()
+
+    schema_text = ""
+
+    for table in df["TABLE_NAME"].unique():
+
+        cols = df[df["TABLE_NAME"]==table]["COLUMN_NAME"].tolist()
+
+        schema_text += f"\nTable: {table}\nColumns: {','.join(cols)}\n"
+
+    return schema_text
+
+
+schema_info = get_schema()
+
 
 # -----------------------------------------------------------------------------
-# Fetch All Chunks
+# Mask PII / PHI
 # -----------------------------------------------------------------------------
-def fetch_all_chunks():
-    return session.sql("""
-        SELECT CHUNK_TEXT
-        FROM AI_POC_DB.PII_PHI_POC.DOCS_CHUNKS_NEW
-    """).to_pandas()
+def mask_sensitive_data(text):
+
+    if text is None:
+        return ""
+
+    text = re.sub(r'\S+@\S+', '[EMAIL_MASKED]', text)
+    text = re.sub(r'\b\d{10}\b', '[PHONE_MASKED]', text)
+    text = re.sub(r'\b\d{3}-\d{2}-\d{4}\b', '[SSN_MASKED]', text)
+
+    return text
+
 
 # -----------------------------------------------------------------------------
-# Extract Names
+# Generate SQL dynamically
 # -----------------------------------------------------------------------------
-def extract_entities(entity_type):
-    df = fetch_all_chunks()
-    full_text = "\n".join(df["CHUNK_TEXT"].tolist())
+def generate_sql(question):
 
     prompt = f"""
-Extract unique {entity_type} names from the text.
+You are an expert Snowflake SQL developer.
 
-Only return names where complete detailed information exists.
-Return comma separated list only.
-Do NOT invent any names. Only use what's present in the text.
+Database schema:
+{schema_info}
 
-Text:
-{full_text}
-"""
+Generate SQL to answer the question.
 
-    response = call_llm(prompt)
-    names = [x.strip() for x in response.split(",") if len(x.strip()) > 2]
-    return list(set(names))
-
-# -----------------------------------------------------------------------------
-# Get Full Details
-# -----------------------------------------------------------------------------
-def get_full_details(name, entity_type):
-    df = fetch_all_chunks()
-    full_text = "\n".join(df["CHUNK_TEXT"].tolist())
-
-    prompt = f"""
-Provide complete detailed information about {entity_type} named {name}.
-Use ONLY the provided text.
-If insufficient data, return NOTHING.
-Do NOT make up any information or hallucinate details.
-
-Text:
-{full_text}
-"""
-
-    return call_llm(prompt)
-
-# -----------------------------------------------------------------------------
-# LOGIN SCREEN
-# -----------------------------------------------------------------------------
-if not st.session_state.authenticated:
-
-    st.title("🔐 Chatbot Login")
-
-    with st.form("login_form"):
-        login_user = st.text_input("Username", placeholder="e.g. Vedant")
-        login_password = st.text_input("Password", type="password")
-        login_btn = st.form_submit_button("Login")
-
-    if login_btn:
-        role = authenticate_user(login_user, login_password)
-
-        if not role:
-            st.error("Invalid credentials")
-            st.stop()
-
-        st.session_state.authenticated = True
-        st.session_state.username = login_user
-        st.session_state.app_role = role
-        st.rerun()
-
-    st.stop()
-
-# -----------------------------------------------------------------------------
-# Sidebar
-# -----------------------------------------------------------------------------
-st.sidebar.success("Authenticated")
-st.sidebar.write("User:", st.session_state.username)
-st.sidebar.write("Role:", st.session_state.app_role.upper())
-
-if st.sidebar.button("Logout"):
-    st.session_state.clear()
-    st.rerun()
-
-# -----------------------------------------------------------------------------
-# ADMIN / OWNER ENTITY VIEW (ChatGPT Style)
-# -----------------------------------------------------------------------------
-if st.session_state.app_role in ["admin", "owner"]:
-
-    st.sidebar.markdown("---")
-    sidebar_tab = st.sidebar.radio(
-        "Select Category",
-        ["Patients Details", "Doctor Details"]
-    )
-
-    if sidebar_tab == "Patients Details":
-        patient_names = extract_entities("patient")
-
-        for name in patient_names:
-            if st.sidebar.button(name, key=f"patient_{name}"):
-
-                details = get_full_details(name, "patient")
-
-                if details.strip():
-                    st.session_state.messages = []
-
-                    st.session_state.messages.append(
-                        {"role": "user", "content": f"tell me about {name}"}
-                    )
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": details}
-                    )
-
-    if sidebar_tab == "Doctor Details":
-        doctor_names = extract_entities("doctor")
-
-        for name in doctor_names:
-            if st.sidebar.button(name, key=f"doctor_{name}"):
-
-                details = get_full_details(name, "doctor")
-
-                if details.strip():
-                    st.session_state.messages = []
-
-                    st.session_state.messages.append(
-                        {"role": "user", "content": f"Show complete details of doctor {name}"}
-                    )
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": details}
-                    )
-
-# -----------------------------------------------------------------------------
-# MAIN CHAT APPLICATION
-# -----------------------------------------------------------------------------
-st.title("📄 PDF Chatbot on Snowflake")
-
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.write(msg["content"])
-
-prompt = st.chat_input("Ask about your PDFs")
-
-if prompt:
-
-    st.session_state.messages.append({"role": "user", "content": prompt})
-
-    with st.chat_message("user"):
-        st.write(prompt)
-
-    with st.chat_message("assistant"):
-
-        with st.spinner("Searching documents..."):
-
-            try:
-                chunks_df = call_search(prompt)
-
-                if chunks_df.empty:
-                    answer = "Information not found in documents."
-                else:
-                    context_text = "\n\n".join(
-                        [
-                            f"[File: {row.SOURCE_FILE} | Page: {row.PAGE_NUM}]\n{row.CHUNK_TEXT}"
-                            for _, row in chunks_df.iterrows()
-                        ]
-                    )
-
-                    full_prompt = f"""
-Use ONLY context provided below.
-If answer cannot be found in context, reply exactly:
-"Information not found in documents."
-Do NOT invent or hallucinate any details.
-
-Context:
-{context_text}
+Rules:
+- Use only tables provided above
+- Use joins if needed
+- Return only SQL
 
 Question:
-{prompt}
-
-Answer:
+{question}
 """
-                    answer = call_llm(full_prompt)
 
-                    if st.session_state.app_role not in ["admin", "owner"]:
-                        answer = mask_answer(answer)
+    result = session.sql(f"""
+    SELECT SNOWFLAKE.CORTEX.COMPLETE(
+        'llama3.1-70b',
+        $$ {prompt} $$
+    )
+    """).collect()
 
-                st.write(answer)
+    sql = result[0][0]
 
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": answer}
-                )
+    if sql is None:
+        return "SELECT 'Unable to generate SQL'"
 
-            except Exception as e:
-                error_msg = f"Error: {str(e)}"
-                st.error(error_msg)
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": error_msg}
-                )
+    sql = sql.replace("```sql","").replace("```","").strip()
+
+    return sql
+
+# -----------------------------------------------------------------------------
+# Validate SQL
+# -----------------------------------------------------------------------------
+def validate_sql(sql):
+
+    sql_upper = sql.upper()
+
+    forbidden = ["DROP","DELETE","UPDATE","INSERT","ALTER"]
+
+    for word in forbidden:
+        if word in sql_upper:
+            return False
+
+    return True
+
+
+# -----------------------------------------------------------------------------
+# Execute Query
+# -----------------------------------------------------------------------------
+def run_query(sql):
+
+    try:
+        df = session.sql(sql).to_pandas()
+        return df
+    except Exception as e:
+        return pd.DataFrame({"ERROR":[str(e)]})
+
+
+# -----------------------------------------------------------------------------
+# Generate Natural Language Response
+# -----------------------------------------------------------------------------
+def generate_answer(question, result):
+
+    prompt = f"""
+User question:
+{question}
+
+Query result:
+{result}
+
+Explain the result clearly in natural language.
+"""
+
+    answer = session.sql(f"""
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(
+        'llama3.1-70b',
+        $$ {prompt} $$
+        )
+    """).collect()[0][0]
+
+    return answer
+
+
+# -----------------------------------------------------------------------------
+# Chat History
+# -----------------------------------------------------------------------------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+for msg in st.session_state.messages:
+    st.chat_message(msg["role"]).write(msg["content"])
+
+
+# -----------------------------------------------------------------------------
+# Chat Input
+# -----------------------------------------------------------------------------
+user_question = st.chat_input("Ask anything about your database")
+
+if user_question:
+
+    st.chat_message("user").write(user_question)
+
+    st.session_state.messages.append({
+        "role":"user",
+        "content":user_question
+    })
+
+    with st.spinner("Analyzing database..."):
+
+        sql_query = generate_sql(user_question)
+
+        st.code(sql_query, language="sql")
+
+        if validate_sql(sql_query):
+
+            df = run_query(sql_query)
+
+            result_text = df.to_string()
+
+            result_text = mask_sensitive_data(result_text)
+
+            answer = generate_answer(user_question, result_text)
+
+        else:
+            answer = "Query blocked due to security restrictions."
+
+    st.chat_message("assistant").write(answer)
+
+    st.session_state.messages.append({
+        "role":"assistant",
+        "content":answer
+    })
