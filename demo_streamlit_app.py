@@ -3,7 +3,7 @@ import pandas as pd
 from snowflake.snowpark.context import get_active_session
 
 # -----------------------------------------------------------------------------
-# App Config
+# App Configuration
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
 
@@ -12,27 +12,30 @@ st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
 # -----------------------------------------------------------------------------
 session = get_active_session()
 
+# -----------------------------------------------------------------------------
+# Settings
+# -----------------------------------------------------------------------------
 MODEL_NAME = "mistral-large2"
 EMBED_MODEL = "snowflake-arctic-embed-m"
 SIMILARITY_THRESHOLD = 0.35
 MAX_CHUNKS = 30
-PAGE_SIZE = 5  # names per batch in sidebar
 
 # -----------------------------------------------------------------------------
 # Session State
 # -----------------------------------------------------------------------------
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
+
 if "username" not in st.session_state:
     st.session_state.username = None
+
 if "app_role" not in st.session_state:
     st.session_state.app_role = None
+
 if "messages" not in st.session_state:
     st.session_state.messages = [
         {"role": "assistant", "content": "Ask me anything about your PDFs."}
     ]
-if "entity_offset" not in st.session_state:
-    st.session_state.entity_offset = 0
 
 # -----------------------------------------------------------------------------
 # Authentication
@@ -41,118 +44,146 @@ def authenticate_user(user_name, password):
     df = session.sql("""
         SELECT APP_ROLE
         FROM AI_POC_DB.PII_PHI_POC.APP_USER_ACCESS
-        WHERE UPPER(USER_NAME) = UPPER(:1)
+        WHERE (
+            UPPER(USER_NAME) = UPPER(:1)
+            OR UPPER(USER_NAME) = SPLIT(UPPER(:1), '@')[0]
+        )
         AND PASSWORD = :2
         AND IS_ACTIVE = TRUE
     """, [user_name, password]).to_pandas()
 
     if df.empty:
         return None
+
     return df.iloc[0]["APP_ROLE"].lower()
 
 # -----------------------------------------------------------------------------
-# LLM
+# LLM Call
 # -----------------------------------------------------------------------------
 def call_llm(prompt):
-    sql = "SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER"
+    sql = """
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER
+    """
     result = session.sql(sql, params=[MODEL_NAME, prompt]).collect()
     return result[0]["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# AUTO FETCH + JOIN ALL TABLES WITH PATIENT_ID (FIXED)
+# Masking
 # -----------------------------------------------------------------------------
-def fetch_joined_tables():
-    tables_df = session.sql("SHOW TABLES IN SCHEMA AI_POC_DB.SP_PII_PHI").to_pandas()
-    if tables_df.empty:
-        return pd.DataFrame()
+def mask_answer(answer_text):
+    masking_prompt = f"""
+Mask ALL PII and PHI.
+Replace sensitive values with: XXXXXX
+Return only masked text.
 
-    # Ensure uppercase column names
-    tables_df.columns = tables_df.columns.str.upper()
-    table_names = tables_df["NAME"].tolist()
-
-    valid_tables = []
-
-    for table in table_names:
-        cols_df = session.sql(f"SHOW COLUMNS IN TABLE AI_POC_DB.SP_PII_PHI.{table}").to_pandas()
-        if cols_df.empty:
-            continue
-        cols_df.columns = cols_df.columns.str.upper()
-        col_list = [c.upper() for c in cols_df["COLUMN_NAME"].tolist()]
-        if "PATIENT_ID" in col_list:
-            valid_tables.append(table)
-
-    if not valid_tables:
-        return pd.DataFrame()
-
-    # Build dynamic join query
-    base_table = valid_tables[0]
-    join_query = f"SELECT * FROM AI_POC_DB.SP_PII_PHI.{base_table} t0 "
-
-    for idx, table in enumerate(valid_tables[1:], start=1):
-        join_query += f"LEFT JOIN AI_POC_DB.SP_PII_PHI.{table} t{idx} ON t0.PATIENT_ID = t{idx}.PATIENT_ID "
-
-    return session.sql(join_query).to_pandas()
+Text:
+{answer_text}
+"""
+    return call_llm(masking_prompt)
 
 # -----------------------------------------------------------------------------
-# Extract Entities from Joined Data
+# Hybrid Search
+# -----------------------------------------------------------------------------
+def call_search(query):
+
+    search_sql = f"""
+        WITH query_vec AS (
+            SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_768(
+                '{EMBED_MODEL}',
+                ?
+            ) AS emb
+        ),
+        vector_results AS (
+            SELECT
+                c.CHUNK_TEXT,
+                c.SOURCE_FILE,
+                c.PAGE_NUM,
+                VECTOR_COSINE_SIMILARITY(c.EMBEDDING, q.emb) AS SCORE
+            FROM AI_POC_DB.PII_PHI_POC.DOCS_CHUNKS_NEW c
+            CROSS JOIN query_vec q
+            WHERE c.EMBEDDING IS NOT NULL
+        )
+        SELECT *
+        FROM vector_results
+        WHERE SCORE >= {SIMILARITY_THRESHOLD}
+        ORDER BY SCORE DESC
+        LIMIT {MAX_CHUNKS}
+    """
+
+    return session.sql(search_sql, params=[query]).to_pandas()
+
+# -----------------------------------------------------------------------------
+# Fetch All Chunks
+# -----------------------------------------------------------------------------
+def fetch_all_chunks():
+    return session.sql("""
+        SELECT CHUNK_TEXT
+        FROM AI_POC_DB.PII_PHI_POC.DOCS_CHUNKS_NEW
+    """).to_pandas()
+
+# -----------------------------------------------------------------------------
+# Extract Names
 # -----------------------------------------------------------------------------
 def extract_entities(entity_type):
-    df = fetch_joined_tables()
-    if df.empty:
-        return []
-
-    text_blob = df.astype(str).agg(" ".join, axis=1).str.cat(sep="\n")
+    df = fetch_all_chunks()
+    full_text = "\n".join(df["CHUNK_TEXT"].tolist())
 
     prompt = f"""
 Extract unique {entity_type} names from the text.
+
 Only return names where complete detailed information exists.
 Return comma separated list only.
 
 Text:
-{text_blob}
+{full_text}
 """
+
     response = call_llm(prompt)
     names = [x.strip() for x in response.split(",") if len(x.strip()) > 2]
-    return list(dict.fromkeys(names))  # remove duplicates
+    return list(set(names))
 
 # -----------------------------------------------------------------------------
 # Get Full Details
 # -----------------------------------------------------------------------------
 def get_full_details(name, entity_type):
-    df = fetch_joined_tables()
-    if df.empty:
-        return ""
-
-    text_blob = df.astype(str).agg(" ".join, axis=1).str.cat(sep="\n")
+    df = fetch_all_chunks()
+    full_text = "\n".join(df["CHUNK_TEXT"].tolist())
 
     prompt = f"""
 Provide complete detailed information about {entity_type} named {name}.
-If insufficient data, return NOTHING.
 Use only provided text.
+If insufficient data, return NOTHING.
 
 Text:
-{text_blob}
+{full_text}
 """
+
     return call_llm(prompt)
 
 # -----------------------------------------------------------------------------
-# LOGIN
+# LOGIN SCREEN
 # -----------------------------------------------------------------------------
 if not st.session_state.authenticated:
+
     st.title("🔐 Chatbot Login")
+
     with st.form("login_form"):
         login_user = st.text_input("Username", placeholder="e.g. Vedant")
         login_password = st.text_input("Password", type="password")
         login_btn = st.form_submit_button("Login")
+
     if login_btn:
         role = authenticate_user(login_user, login_password)
+
         if not role:
             st.error("Invalid credentials")
             st.stop()
+
         st.session_state.authenticated = True
         st.session_state.username = login_user
         st.session_state.app_role = role
         st.rerun()
+
     st.stop()
 
 # -----------------------------------------------------------------------------
@@ -167,37 +198,54 @@ if st.sidebar.button("Logout"):
     st.rerun()
 
 # -----------------------------------------------------------------------------
-# ADMIN / OWNER ENTITY VIEW WITH "+ MORE"
+# ADMIN / OWNER ENTITY VIEW (ChatGPT Style)
 # -----------------------------------------------------------------------------
 if st.session_state.app_role in ["admin", "owner"]:
+
     st.sidebar.markdown("---")
-    category = st.sidebar.radio("Select Category", ["Patients Details", "Doctor Details"])
-    entity_type = "patient" if category == "Patients Details" else "doctor"
+    sidebar_tab = st.sidebar.radio(
+        "Select Category",
+        ["Patients Details", "Doctor Details"]
+    )
 
-    names = extract_entities(entity_type)
-    start = st.session_state.entity_offset
-    end = start + PAGE_SIZE
-    visible_names = names[start:end]
+    if sidebar_tab == "Patients Details":
+        patient_names = extract_entities("patient")
 
-    for name in visible_names:
-        if st.sidebar.button(name, key=f"{entity_type}_{name}"):
-            details = get_full_details(name, entity_type)
-            if details.strip():
-                st.session_state.messages = []
-                st.session_state.messages.append(
-                    {"role": "user", "content": f"Show complete details of {entity_type} {name}"}
-                )
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": details}
-                )
+        for name in patient_names:
+            if st.sidebar.button(name, key=f"patient_{name}"):
 
-    if end < len(names):
-        if st.sidebar.button("+ More"):
-            st.session_state.entity_offset += PAGE_SIZE
-            st.rerun()
+                details = get_full_details(name, "patient")
+
+                if details.strip():
+                    st.session_state.messages = []
+
+                    st.session_state.messages.append(
+                        {"role": "user", "content": f"Show complete details of patient {name}"}
+                    )
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": details}
+                    )
+
+    if sidebar_tab == "Doctor Details":
+        doctor_names = extract_entities("doctor")
+
+        for name in doctor_names:
+            if st.sidebar.button(name, key=f"doctor_{name}"):
+
+                details = get_full_details(name, "doctor")
+
+                if details.strip():
+                    st.session_state.messages = []
+
+                    st.session_state.messages.append(
+                        {"role": "user", "content": f"Show complete details of doctor {name}"}
+                    )
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": details}
+                    )
 
 # -----------------------------------------------------------------------------
-# MAIN CHAT
+# MAIN CHAT APPLICATION
 # -----------------------------------------------------------------------------
 st.title("📄 PDF Chatbot on Snowflake")
 
@@ -208,29 +256,56 @@ for msg in st.session_state.messages:
 prompt = st.chat_input("Ask about your PDFs")
 
 if prompt:
+
     st.session_state.messages.append({"role": "user", "content": prompt})
 
+    with st.chat_message("user"):
+        st.write(prompt)
+
     with st.chat_message("assistant"):
-        with st.spinner("Analyzing..."):
-            joined_df = fetch_joined_tables()
-            if joined_df.empty:
-                answer = "Information not found in documents."
-            else:
-                text_blob = joined_df.astype(str).agg(" ".join, axis=1).str.cat(sep="\n")
-                full_prompt = f"""
-Use only the following data.
-If answer not present, say:
+
+        with st.spinner("Searching documents..."):
+
+            try:
+                chunks_df = call_search(prompt)
+
+                if chunks_df.empty:
+                    answer = "Information not found in documents."
+                else:
+                    context_text = "\n\n".join(
+                        [
+                            f"[File: {row.SOURCE_FILE} | Page: {row.PAGE_NUM}]\n{row.CHUNK_TEXT}"
+                            for _, row in chunks_df.iterrows()
+                        ]
+                    )
+
+                    full_prompt = f"""
+Use ONLY context.
+If not present, say:
 "Information not found in documents."
 
-Data:
-{text_blob}
+Context:
+{context_text}
 
 Question:
 {prompt}
 
 Answer:
 """
-                answer = call_llm(full_prompt)
+                    answer = call_llm(full_prompt)
 
-            st.write(answer)
-            st.session_state.messages.append({"role": "assistant", "content": answer})
+                    if st.session_state.app_role not in ["admin", "owner"]:
+                        answer = mask_answer(answer)
+
+                st.write(answer)
+
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": answer}
+                )
+
+            except Exception as e:
+                error_msg = f"Error: {str(e)}"
+                st.error(error_msg)
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": error_msg}
+                )
