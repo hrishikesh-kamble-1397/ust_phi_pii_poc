@@ -66,14 +66,6 @@ You MUST use only the tables and columns listed below.
 
 DATABASE SCHEMA:
 {schema_info}
-Rules:
-1. Some tables store patient names as FULL_NAME.
-2. Some store FIRST_NAME and LAST_NAME separately.
-3. Some store PATIENT_NAME.
-4. When filtering for a patient, detect the correct columns and apply appropriate filtering.
-5. Use ILIKE for name matching.
-
-Return ONLY SQL.
 
 Instructions:
 1. Only use table names and column names from the schema above.
