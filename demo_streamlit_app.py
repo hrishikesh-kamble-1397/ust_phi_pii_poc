@@ -75,6 +75,7 @@ def mask_answer(answer_text):
 Mask ALL PII and PHI.
 Replace sensitive values with: XXXXXX
 Return only masked text.
+Do NOT invent or add any new information. Only mask what's present.
 
 Text:
 {answer_text}
@@ -133,6 +134,7 @@ Extract unique {entity_type} names from the text.
 
 Only return names where complete detailed information exists.
 Return comma separated list only.
+Do NOT invent any names. Only use what's present in the text.
 
 Text:
 {full_text}
@@ -151,8 +153,9 @@ def get_full_details(name, entity_type):
 
     prompt = f"""
 Provide complete detailed information about {entity_type} named {name}.
-Use only provided text.
+Use ONLY the provided text.
 If insufficient data, return NOTHING.
+Do NOT make up any information or hallucinate details.
 
 Text:
 {full_text}
@@ -280,9 +283,10 @@ if prompt:
                     )
 
                     full_prompt = f"""
-Use ONLY context.
-If not present, say:
+Use ONLY context provided below.
+If answer cannot be found in context, reply exactly:
 "Information not found in documents."
+Do NOT invent or hallucinate any details.
 
 Context:
 {context_text}
