@@ -10,3 +10,190 @@ st.set_page_config(page_title="AI Database Chatbot", layout="wide")
 st.title("🤖 AI Database Chatbot (Auto Schema Discovery)")
 
 session = get_active_session()
+
+# -----------------------------------------------------------------------------
+# Get Database Schema Automatically
+# -----------------------------------------------------------------------------
+@st.cache_data
+def get_schema():
+
+    query = """
+    SELECT
+        TABLE_NAME,
+        COLUMN_NAME,
+        DATA_TYPE
+    FROM INFORMATION_SCHEMA.COLUMNS
+    ORDER BY TABLE_NAME
+    """
+
+    df = session.sql(query).to_pandas()
+
+    schema_text = ""
+
+    for table in df["TABLE_NAME"].unique():
+
+        cols = df[df["TABLE_NAME"]==table]["COLUMN_NAME"].tolist()
+
+        schema_text += f"\nTable: {table}\nColumns: {','.join(cols)}\n"
+
+    return schema_text
+
+
+schema_info = get_schema()
+
+
+# -----------------------------------------------------------------------------
+# Mask PII / PHI
+# -----------------------------------------------------------------------------
+def mask_sensitive_data(text):
+
+    if text is None:
+        return ""
+
+    text = re.sub(r'\S+@\S+', '[EMAIL_MASKED]', text)
+    text = re.sub(r'\b\d{10}\b', '[PHONE_MASKED]', text)
+    text = re.sub(r'\b\d{3}-\d{2}-\d{4}\b', '[SSN_MASKED]', text)
+
+    return text
+
+
+# -----------------------------------------------------------------------------
+# Generate SQL dynamically
+# -----------------------------------------------------------------------------
+def generate_sql(question):
+
+    prompt = f"""
+You are an expert Snowflake SQL developer.
+
+Database schema:
+{schema_info}
+
+Generate SQL to answer the question.
+
+Rules:
+- Use only tables provided above
+- Use joins if needed
+- Return only SQL
+
+Question:
+{question}
+"""
+
+    result = session.sql(f"""
+    SELECT SNOWFLAKE.CORTEX.COMPLETE(
+        'llama3.1-70b',
+        $$ {prompt} $$
+    )
+    """).collect()
+
+    sql = result[0][0]
+
+    if sql is None:
+        return "SELECT 'Unable to generate SQL'"
+
+    sql = sql.replace("```sql","").replace("```","").strip()
+
+    return sql
+
+# -----------------------------------------------------------------------------
+# Validate SQL
+# -----------------------------------------------------------------------------
+def validate_sql(sql):
+
+    sql_upper = sql.upper()
+
+    forbidden = ["DROP","DELETE","UPDATE","INSERT","ALTER"]
+
+    for word in forbidden:
+        if word in sql_upper:
+            return False
+
+    return True
+
+
+# -----------------------------------------------------------------------------
+# Execute Query
+# -----------------------------------------------------------------------------
+def run_query(sql):
+
+    try:
+        df = session.sql(sql).to_pandas()
+        return df
+    except Exception as e:
+        return pd.DataFrame({"ERROR":[str(e)]})
+
+
+# -----------------------------------------------------------------------------
+# Generate Natural Language Response
+# -----------------------------------------------------------------------------
+def generate_answer(question, result):
+
+    prompt = f"""
+User question:
+{question}
+
+Query result:
+{result}
+
+Explain the result clearly in natural language.
+"""
+
+    answer = session.sql(f"""
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(
+        'llama3.1-70b',
+        $$ {prompt} $$
+        )
+    """).collect()[0][0]
+
+    return answer
+
+
+# -----------------------------------------------------------------------------
+# Chat History
+# -----------------------------------------------------------------------------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+for msg in st.session_state.messages:
+    st.chat_message(msg["role"]).write(msg["content"])
+
+
+# -----------------------------------------------------------------------------
+# Chat Input
+# -----------------------------------------------------------------------------
+user_question = st.chat_input("Ask anything about your database")
+
+if user_question:
+
+    st.chat_message("user").write(user_question)
+
+    st.session_state.messages.append({
+        "role":"user",
+        "content":user_question
+    })
+
+    with st.spinner("Analyzing database..."):
+
+        sql_query = generate_sql(user_question)
+
+        st.code(sql_query, language="sql")
+
+        if validate_sql(sql_query):
+
+            df = run_query(sql_query)
+
+            result_text = df.to_string()
+
+            result_text = mask_sensitive_data(result_text)
+
+            answer = generate_answer(user_question, result_text)
+
+        else:
+            answer = "Query blocked due to security restrictions."
+
+    st.chat_message("assistant").write(answer)
+
+    st.session_state.messages.append({
+        "role":"assistant",
+        "content":answer
+    })
