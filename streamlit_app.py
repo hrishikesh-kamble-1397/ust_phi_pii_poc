@@ -1,155 +1,173 @@
 import streamlit as st
 import pandas as pd
+import re
 from snowflake.snowpark.context import get_active_session
 
 # -----------------------------------------------------------------------------
-# App Config
+# Streamlit Config
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="AI Database Chatbot", layout="wide")
+st.title("🤖 AI Database Chatbot (Auto Schema Discovery)")
 
 session = get_active_session()
 
-st.title("🧠 Snowflake Cortex AI - Healthcare Chatbot")
-
 # -----------------------------------------------------------------------------
-# Get Database Schema Dynamically
+# Get Database Schema Automatically
 # -----------------------------------------------------------------------------
 @st.cache_data
 def get_schema():
 
-    schema_query = """
-    SELECT
-        table_schema,
-        table_name,
-        column_name
+    query = """
+    SELECT TABLE_NAME, COLUMN_NAME
     FROM AI_POC_DB.INFORMATION_SCHEMA.COLUMNS
-    WHERE table_schema NOT IN ('INFORMATION_SCHEMA')
-    ORDER BY table_schema, table_name
+    ORDER BY TABLE_NAME
     """
 
-    df = session.sql(schema_query).to_pandas()
+    df = session.sql(query).to_pandas()
 
-    schema_text = ""
+    schema_text=""
 
     for table in df["TABLE_NAME"].unique():
-        cols = df[df["TABLE_NAME"] == table]["COLUMN_NAME"].tolist()
-        schema_text += f"\nTable: {table}\nColumns: {', '.join(cols)}\n"
+
+        cols=df[df["TABLE_NAME"]==table]["COLUMN_NAME"].tolist()
+
+        schema_text+=f"{table}({','.join(cols)})\n"
 
     return schema_text
 
 
 schema_info = get_schema()
 
+
 # -----------------------------------------------------------------------------
-# Generate SQL using Cortex
+# Mask PII / PHI
+# -----------------------------------------------------------------------------
+def mask_sensitive_data(text):
+
+    if text is None:
+        return ""
+
+    text = re.sub(r'\S+@\S+', '[EMAIL_MASKED]', text)
+    text = re.sub(r'\b\d{10}\b', '[PHONE_MASKED]', text)
+    text = re.sub(r'\b\d{3}-\d{2}-\d{4}\b', '[SSN_MASKED]', text)
+
+    return text
+
+
+# -----------------------------------------------------------------------------
+# Generate SQL dynamically
 # -----------------------------------------------------------------------------
 def generate_sql(question):
 
     prompt = f"""
-You are an expert Snowflake SQL generator.
+You are an expert Snowflake SQL developer.
 
-Database Schema:
+You MUST use only the tables and columns listed below.
+
+DATABASE SCHEMA:
 {schema_info}
+
+Instructions:
+1. Only use table names and column names from the schema above.
+2. If the user's words do not exactly match a column, choose the closest meaning column.
+3. If multiple tables exist, create appropriate joins.
+4. Do NOT invent columns.
+5. Return ONLY Snowflake SQL.
+6. Query must start with SELECT.
 
 User Question:
 {question}
-
-Instructions:
-
-1. Find relevant tables automatically.
-2. Identify patient name columns even if named:
-   - full_name
-   - first_name
-   - last_name
-   - patient_name
-3. Join tables if needed.
-4. Return only valid Snowflake SQL.
-5. Limit result to 20 rows.
-
-Return SQL only.
 """
 
-    sql = session.sql(f"""
-        SELECT SNOWFLAKE.CORTEX.COMPLETE(
-            'llama3.1-70b',
-            $$
-            {prompt}
-            $$
-        )
-    """).collect()[0][0]
+    result = session.sql(f"""
+    SELECT SNOWFLAKE.CORTEX.COMPLETE(
+        'llama3.1-70b',
+        $$ {prompt} $$
+    )
+    """).collect()
+
+    sql = result[0][0]
+
+    if sql is None:
+        return "SELECT 'Unable to generate SQL'"
 
     sql = sql.replace("```sql","").replace("```","").strip()
 
     return sql
 
+# -----------------------------------------------------------------------------
+# Validate SQL
+# -----------------------------------------------------------------------------
+def validate_sql(sql):
+
+    sql_upper = sql.upper()
+
+    forbidden = ["DROP","DELETE","UPDATE","INSERT","ALTER"]
+
+    for word in forbidden:
+        if word in sql_upper:
+            return False
+
+    return True
+
 
 # -----------------------------------------------------------------------------
-# Execute SQL
+# Execute Query
 # -----------------------------------------------------------------------------
-def run_query(question):
+def run_query(sql, question):
 
     try:
-
-        sql = generate_sql(question)
-
-        df = session.sql(sql).to_pandas()
-
-        return df
+        return session.sql(sql).to_pandas()
 
     except Exception as e:
-        return pd.DataFrame({"Error":[str(e)]})
 
+        error=str(e)
 
+        fix_prompt=f"""
+The following Snowflake SQL failed.
+
+SQL:
+{sql}
+
+Error:
+{error}
+
+Database schema:
+{schema_info}
+
+Fix the SQL.
+Return only corrected SQL.
+"""
+
+        fixed_sql=session.sql(f"""
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(
+        'llama3.1-70b',
+        $$ {fix_prompt} $$
+        )
+        """).collect()[0][0]
+
+        fixed_sql=fixed_sql.replace("```","").strip()
+
+        return session.sql(fixed_sql).to_pandas()
 # -----------------------------------------------------------------------------
-# PII / PHI Masking
+# Generate Natural Language Response
 # -----------------------------------------------------------------------------
-def mask_sensitive_data(df):
-
-    pii_keywords = [
-        "name",
-        "first",
-        "last",
-        "email",
-        "phone",
-        "mobile",
-        "ssn",
-        "dob",
-        "address"
-    ]
-
-    for col in df.columns:
-
-        if any(k in col.lower() for k in pii_keywords):
-
-            df[col] = df[col].astype(str).str[:2] + "****"
-
-    return df
-
-
-# -----------------------------------------------------------------------------
-# Convert Data to Natural Language
-# -----------------------------------------------------------------------------
-def generate_answer(question, df):
-
-    data_text = df.to_string(index=False)
+def generate_answer(question, result):
 
     prompt = f"""
-User Question:
+User question:
 {question}
 
-Database Result:
-{data_text}
+Query result:
+{result}
 
-Explain the answer in natural language.
-Avoid exposing PII or PHI.
+Explain the result clearly in natural language.
 """
 
     answer = session.sql(f"""
         SELECT SNOWFLAKE.CORTEX.COMPLETE(
         'llama3.1-70b',
-        $$
-        {prompt}
-        $$
+        $$ {prompt} $$
         )
     """).collect()[0][0]
 
@@ -157,20 +175,51 @@ Avoid exposing PII or PHI.
 
 
 # -----------------------------------------------------------------------------
-# Chat Interface
+# Chat History
 # -----------------------------------------------------------------------------
-question = st.chat_input("Ask about patients, treatments, reports...")
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-if question:
+for msg in st.session_state.messages:
+    st.chat_message(msg["role"]).write(msg["content"])
 
-    with st.spinner("Searching database..."):
 
-        df = run_query(question)
+# -----------------------------------------------------------------------------
+# Chat Input
+# -----------------------------------------------------------------------------
+user_question = st.chat_input("Ask anything about your database")
 
-        df = mask_sensitive_data(df)
+if user_question:
 
-        answer = generate_answer(question, df)
+    st.chat_message("user").write(user_question)
 
-        st.write(answer)
+    st.session_state.messages.append({
+        "role":"user",
+        "content":user_question
+    })
 
-        st.dataframe(df)
+    with st.spinner("Analyzing database..."):
+
+        sql_query = generate_sql(user_question)
+
+        #st.code(sql_query, language="sql")
+
+        if validate_sql(sql_query):
+
+            df = run_query(sql_query,user_question)
+
+            result_text = df.to_string()
+
+            result_text = mask_sensitive_data(result_text)
+
+            answer = generate_answer(user_question, result_text)
+
+        else:
+            answer = "Query blocked due to security restrictions."
+
+    st.chat_message("assistant").write(answer)
+
+    st.session_state.messages.append({
+        "role":"assistant",
+        "content":answer
+    })
