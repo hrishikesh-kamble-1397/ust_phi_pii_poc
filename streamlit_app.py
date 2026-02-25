@@ -206,7 +206,7 @@ if user_question:
 
         if validate_sql(sql_query):
 
-            df = run_query(sql_query)
+            df = run_query(sql_query,user_question)
 
             result_text = df.to_string()
 
