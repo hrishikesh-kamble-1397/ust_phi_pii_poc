@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-#import re
+import re
 from snowflake.snowpark.context import get_active_session
 
 # -----------------------------------------------------------------------------
@@ -45,16 +45,16 @@ schema_info = get_schema()
 # -----------------------------------------------------------------------------
 # Mask PII / PHI
 # -----------------------------------------------------------------------------
-#def mask_sensitive_data(text):
+def mask_sensitive_data(text):
 
- #   if text is None:
-  #      return ""
+   if text is None:
+      return ""
 
-   # text = re.sub(r'\S+@\S+', '[EMAIL_MASKED]', text)
-   # text = re.sub(r'\b\d{10}\b', '[PHONE_MASKED]', text)
-   # text = re.sub(r'\b\d{3}-\d{2}-\d{4}\b', '[SSN_MASKED]', text)
+    text = re.sub(r'\S+@\S+', '[EMAIL_MASKED]', text)
+    text = re.sub(r'\b\d{10}\b', '[PHONE_MASKED]', text)
+    text = re.sub(r'\b\d{3}-\d{2}-\d{4}\b', '[SSN_MASKED]', text)
 
-    # return text
+    return text
 
 
 # -----------------------------------------------------------------------------
@@ -106,16 +106,21 @@ Question:
 # -----------------------------------------------------------------------------
 def validate_sql(sql):
 
+    if not sql:
+        return False
+
     sql_upper = sql.upper()
 
-    forbidden = ["DROP","DELETE","UPDATE","INSERT","ALTER"]
+    forbidden = ["DROP","DELETE","UPDATE","INSERT","ALTER","TRUNCATE"]
 
     for word in forbidden:
         if word in sql_upper:
             return False
 
-    return True
+    if not sql_upper.startswith("SELECT"):
+        return False
 
+    return True
 
 # -----------------------------------------------------------------------------
 # Execute Query
@@ -123,9 +128,16 @@ def validate_sql(sql):
 def run_query(sql):
 
     try:
+
+        if not sql or not isinstance(sql, str):
+            return pd.DataFrame({"ERROR":["Invalid SQL generated"]})
+
         df = session.sql(sql).to_pandas()
+
         return df
+
     except Exception as e:
+
         return pd.DataFrame({"ERROR":[str(e)]})
 
 
