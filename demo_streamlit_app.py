@@ -223,7 +223,7 @@ if st.session_state.app_role in ["admin", "owner"]:
                     st.session_state.messages = []
 
                     st.session_state.messages.append(
-                        {"role": "user", "content": f"Show complete details of patient {name}"}
+                        {"role": "user", "content": f"tell me about {name}"}
                     )
                     st.session_state.messages.append(
                         {"role": "assistant", "content": details}
