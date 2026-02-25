@@ -63,38 +63,44 @@ schema_info = get_schema()
 def generate_sql(question):
 
     prompt = f"""
-You are an expert Snowflake SQL developer.
+You are a Snowflake SQL expert.
 
 Database schema:
 {schema_info}
 
-Generate SQL to answer the question.
+Generate ONLY valid Snowflake SQL.
 
 Rules:
-- Use only tables provided above
-- Use joins if needed
-- Return only SQL
+- Return ONLY SQL
+- No explanation
+- No markdown
+- Use only provided tables
 
 Question:
 {question}
 """
 
     result = session.sql(f"""
-    SELECT SNOWFLAKE.CORTEX.COMPLETE(
-        'llama3.1-70b',
-        $$ {prompt} $$
-    )
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(
+            'llama3.1-70b',
+            $$ {prompt} $$
+        )
     """).collect()
 
     sql = result[0][0]
 
+    # Safety cleaning
     if sql is None:
-        return "SELECT 'Unable to generate SQL'"
+        return ""
 
-    sql = sql.replace("```sql","").replace("```","").strip()
+    sql = str(sql)
+
+    # Remove markdown
+    sql = sql.replace("```sql", "")
+    sql = sql.replace("```", "")
+    sql = sql.strip()
 
     return sql
-
 # -----------------------------------------------------------------------------
 # Validate SQL
 # -----------------------------------------------------------------------------
