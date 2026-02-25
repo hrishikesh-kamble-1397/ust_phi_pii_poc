@@ -202,7 +202,7 @@ if user_question:
 
         sql_query = generate_sql(user_question)
 
-        st.code(sql_query, language="sql")
+        #st.code(sql_query, language="sql")
 
         if validate_sql(sql_query):
 
