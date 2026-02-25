@@ -1,44 +1,195 @@
-# Import python packages
 import streamlit as st
+import pandas as pd
+import re
 from snowflake.snowpark.context import get_active_session
 
-# Write directly to the app
-st.title(f"Example Streamlit App :balloon: {st.__version__}")
-st.write(
-  """Replace this example with your own code!
-  **And if you're new to Streamlit,** check
-  out our easy-to-follow guides at
-  [docs.streamlit.io](https://docs.streamlit.io).
-  """
-)
+# -----------------------------------------------------------------------------
+# Streamlit Config
+# -----------------------------------------------------------------------------
+st.set_page_config(page_title="AI Database Chatbot", layout="wide")
+st.title("🤖 AI Database Chatbot (Auto Schema Discovery)")
 
-# Get the current credentials
 session = get_active_session()
 
-# Use an interactive slider to get user input
-hifives_val = st.slider(
-  "Number of high-fives in Q3",
-  min_value=0,
-  max_value=90,
-  value=60,
-  help="Use this to enter the number of high-fives you gave in Q3",
-)
+# -----------------------------------------------------------------------------
+# Get Database Schema Automatically
+# -----------------------------------------------------------------------------
+@st.cache_data
+def get_schema():
 
-#  Create an example dataframe
-#  Note: this is just some dummy data, but you can easily connect to your Snowflake data
-#  It is also possible to query data using raw SQL using session.sql() e.g. session.sql("select * from table")
-created_dataframe = session.create_dataframe(
-  [[50, 25, "Q1"], [20, 35, "Q2"], [hifives_val, 30, "Q3"]],
-  schema=["HIGH_FIVES", "FIST_BUMPS", "QUARTER"],
-)
+    query = """
+    SELECT
+        TABLE_NAME,
+        COLUMN_NAME,
+        DATA_TYPE
+    FROM INFORMATION_SCHEMA.COLUMNS
+    ORDER BY TABLE_NAME
+    """
 
-# Execute the query and convert it into a Pandas dataframe
-queried_data = created_dataframe.to_pandas()
+    df = session.sql(query).to_pandas()
 
-# Create a simple bar chart
-# See docs.streamlit.io for more types of charts
-st.subheader("Number of high-fives")
-st.bar_chart(data=queried_data, x="QUARTER", y="HIGH_FIVES")
+    schema_text = ""
 
-st.subheader("Underlying data")
-st.dataframe(queried_data, use_container_width=True)
+    for table in df["TABLE_NAME"].unique():
+
+        cols = df[df["TABLE_NAME"]==table]["COLUMN_NAME"].tolist()
+
+        schema_text += f"\nTable: {table}\nColumns: {','.join(cols)}\n"
+
+    return schema_text
+
+
+schema_info = get_schema()
+
+
+# -----------------------------------------------------------------------------
+# Mask PII / PHI
+# -----------------------------------------------------------------------------
+def mask_sensitive_data(text):
+
+    if text is None:
+        return ""
+
+    text = re.sub(r'\S+@\S+', '[EMAIL_MASKED]', text)
+    text = re.sub(r'\b\d{10}\b', '[PHONE_MASKED]', text)
+    text = re.sub(r'\b\d{3}-\d{2}-\d{4}\b', '[SSN_MASKED]', text)
+
+    return text
+
+
+# -----------------------------------------------------------------------------
+# Generate SQL dynamically
+# -----------------------------------------------------------------------------
+def generate_sql(question):
+
+    prompt = f"""
+You are an expert Snowflake SQL developer.
+
+Database schema:
+
+{schema_info}
+
+Generate SQL to answer the question.
+
+Rules:
+- Use only tables provided above
+- Use joins if needed
+- Return only SQL
+- Do not explain anything
+
+Question:
+{question}
+"""
+
+    sql = session.sql(f"""
+    SELECT SNOWFLAKE.CORTEX.COMPLETE(
+        'llama3.1-70b',
+        $$ {prompt} $$
+    ) AS RESPONSE
+    """).collect()[0]["RESPONSE"]
+
+    return sql
+
+
+# -----------------------------------------------------------------------------
+# Validate SQL
+# -----------------------------------------------------------------------------
+def validate_sql(sql):
+
+    sql_upper = sql.upper()
+
+    forbidden = ["DROP","DELETE","UPDATE","INSERT","ALTER"]
+
+    for word in forbidden:
+        if word in sql_upper:
+            return False
+
+    return True
+
+
+# -----------------------------------------------------------------------------
+# Execute Query
+# -----------------------------------------------------------------------------
+def run_query(sql):
+
+    try:
+        df = session.sql(sql).to_pandas()
+        return df
+    except Exception as e:
+        return pd.DataFrame({"ERROR":[str(e)]})
+
+
+# -----------------------------------------------------------------------------
+# Generate Natural Language Response
+# -----------------------------------------------------------------------------
+def generate_answer(question, result):
+
+    prompt = f"""
+User question:
+{question}
+
+Query result:
+{result}
+
+Explain the result clearly in natural language.
+"""
+
+    answer = session.sql(f"""
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(
+        'llama3.1-70b',
+        $$ {prompt} $$
+        )
+    """).collect()[0][0]
+
+    return answer
+
+
+# -----------------------------------------------------------------------------
+# Chat History
+# -----------------------------------------------------------------------------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+for msg in st.session_state.messages:
+    st.chat_message(msg["role"]).write(msg["content"])
+
+
+# -----------------------------------------------------------------------------
+# Chat Input
+# -----------------------------------------------------------------------------
+user_question = st.chat_input("Ask anything about your database")
+
+if user_question:
+
+    st.chat_message("user").write(user_question)
+
+    st.session_state.messages.append({
+        "role":"user",
+        "content":user_question
+    })
+
+    with st.spinner("Analyzing database..."):
+
+        sql_query = generate_sql(user_question)
+
+        st.code(sql_query, language="sql")
+
+        if validate_sql(sql_query):
+
+            df = run_query(sql_query)
+
+            result_text = df.to_string()
+
+            result_text = mask_sensitive_data(result_text)
+
+            answer = generate_answer(user_question, result_text)
+
+        else:
+            answer = "Query blocked due to security restrictions."
+
+    st.chat_message("assistant").write(answer)
+
+    st.session_state.messages.append({
+        "role":"assistant",
+        "content":answer
+    })
