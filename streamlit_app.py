@@ -18,23 +18,20 @@ session = get_active_session()
 def get_schema():
 
     query = """
-    SELECT
-        TABLE_NAME,
-        COLUMN_NAME,
-        DATA_TYPE
-    FROM AI_POC_DB.INFORMATION_SCHEMA.COLUMNS
+    SELECT TABLE_NAME, COLUMN_NAME
+    FROM INFORMATION_SCHEMA.COLUMNS
     ORDER BY TABLE_NAME
     """
 
     df = session.sql(query).to_pandas()
 
-    schema_text = ""
+    schema_text=""
 
     for table in df["TABLE_NAME"].unique():
 
-        cols = df[df["TABLE_NAME"]==table]["COLUMN_NAME"].tolist()
+        cols=df[df["TABLE_NAME"]==table]["COLUMN_NAME"].tolist()
 
-        schema_text += f"\nTable: {table}\nColumns: {','.join(cols)}\n"
+        schema_text+=f"{table}({','.join(cols)})\n"
 
     return schema_text
 
@@ -65,17 +62,20 @@ def generate_sql(question):
     prompt = f"""
 You are an expert Snowflake SQL developer.
 
-Database schema:
+You MUST use only the tables and columns listed below.
+
+DATABASE SCHEMA:
 {schema_info}
 
-Generate SQL to answer the question.
+Instructions:
+1. Only use table names and column names from the schema above.
+2. If the user's words do not exactly match a column, choose the closest meaning column.
+3. If multiple tables exist, create appropriate joins.
+4. Do NOT invent columns.
+5. Return ONLY Snowflake SQL.
+6. Query must start with SELECT.
 
-Rules:
-- Use only tables provided above
-- Use joins if needed
-- Return only SQL
-
-Question:
+User Question:
 {question}
 """
 
@@ -114,15 +114,41 @@ def validate_sql(sql):
 # -----------------------------------------------------------------------------
 # Execute Query
 # -----------------------------------------------------------------------------
-def run_query(sql):
+def run_query(sql, question):
 
     try:
-        df = session.sql(sql).to_pandas()
-        return df
+        return session.sql(sql).to_pandas()
+
     except Exception as e:
-        return pd.DataFrame({"ERROR":[str(e)]})
 
+        error=str(e)
 
+        fix_prompt=f"""
+The following Snowflake SQL failed.
+
+SQL:
+{sql}
+
+Error:
+{error}
+
+Database schema:
+{schema_info}
+
+Fix the SQL.
+Return only corrected SQL.
+"""
+
+        fixed_sql=session.sql(f"""
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(
+        'llama3.1-70b',
+        $$ {fix_prompt} $$
+        )
+        """).collect()[0][0]
+
+        fixed_sql=fixed_sql.replace("```","").strip()
+
+        return session.sql(fixed_sql).to_pandas()
 # -----------------------------------------------------------------------------
 # Generate Natural Language Response
 # -----------------------------------------------------------------------------
