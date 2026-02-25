@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import re
+#import re
 from snowflake.snowpark.context import get_active_session
 
 # -----------------------------------------------------------------------------
@@ -45,16 +45,16 @@ schema_info = get_schema()
 # -----------------------------------------------------------------------------
 # Mask PII / PHI
 # -----------------------------------------------------------------------------
-def mask_sensitive_data(text):
+#def mask_sensitive_data(text):
 
-    if text is None:
-        return ""
+ #   if text is None:
+  #      return ""
 
-    text = re.sub(r'\S+@\S+', '[EMAIL_MASKED]', text)
-    text = re.sub(r'\b\d{10}\b', '[PHONE_MASKED]', text)
-    text = re.sub(r'\b\d{3}-\d{2}-\d{4}\b', '[SSN_MASKED]', text)
+   # text = re.sub(r'\S+@\S+', '[EMAIL_MASKED]', text)
+   # text = re.sub(r'\b\d{10}\b', '[PHONE_MASKED]', text)
+   # text = re.sub(r'\b\d{3}-\d{2}-\d{4}\b', '[SSN_MASKED]', text)
 
-    return text
+    # return text
 
 
 # -----------------------------------------------------------------------------
