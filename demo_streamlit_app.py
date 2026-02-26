@@ -3,9 +3,9 @@ import pandas as pd
 from snowflake.snowpark.context import get_active_session
 
 # -----------------------------------------------------------------------------
-# App Config
+# App Configuration
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="PDF Chatbot", page_icon="📄", layout="wide")
+st.set_page_config(page_title="PDF/Database Chatbot", page_icon="📄", layout="wide")
 
 # -----------------------------------------------------------------------------
 # Snowflake Session
@@ -34,8 +34,11 @@ if "app_role" not in st.session_state:
 
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "Ask me anything about your PDFs."}
+        {"role": "assistant", "content": "Ask me anything about your PDFs or database."}
     ]
+
+if "mode" not in st.session_state:
+    st.session_state.mode = "PDF"
 
 # -----------------------------------------------------------------------------
 # Authentication
@@ -61,14 +64,12 @@ def authenticate_user(user_name, password):
 # LLM Call
 # -----------------------------------------------------------------------------
 def call_llm(prompt):
-    sql = """
-        SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER
-    """
+    sql = """ SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER """
     result = session.sql(sql, params=[MODEL_NAME, prompt]).collect()
     return result[0]["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Masking
+# Masking (for PDF mode)
 # -----------------------------------------------------------------------------
 def mask_answer(answer_text):
     masking_prompt = f"""
@@ -83,10 +84,9 @@ Text:
     return call_llm(masking_prompt)
 
 # -----------------------------------------------------------------------------
-# Hybrid Search
+# PDF Functions
 # -----------------------------------------------------------------------------
 def call_search(query):
-
     search_sql = f"""
         WITH query_vec AS (
             SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_768(
@@ -110,12 +110,8 @@ def call_search(query):
         ORDER BY SCORE DESC
         LIMIT {MAX_CHUNKS}
     """
-
     return session.sql(search_sql, params=[query]).to_pandas()
 
-# -----------------------------------------------------------------------------
-# Fetch All Chunks
-# -----------------------------------------------------------------------------
 def fetch_all_chunks():
     return session.sql("""
         SELECT CHUNK_TEXT
@@ -123,44 +119,50 @@ def fetch_all_chunks():
     """).to_pandas()
 
 # -----------------------------------------------------------------------------
-# Extract Names
+# Database Functions
 # -----------------------------------------------------------------------------
-def extract_entities(entity_type):
-    df = fetch_all_chunks()
-    full_text = "\n".join(df["CHUNK_TEXT"].tolist())
+def create_db_metadata_views():
+    # Create temporary view for tables metadata
+    session.sql("""
+        CREATE OR REPLACE TEMPORARY VIEW DB_TABLES_VIEW AS
+        SELECT *
+        FROM INFORMATION_SCHEMA.TABLES
+    """).collect()
 
+    # Create temporary view for columns metadata
+    session.sql("""
+        CREATE OR REPLACE TEMPORARY VIEW DB_COLUMNS_VIEW AS
+        SELECT *
+        FROM INFORMATION_SCHEMA.COLUMNS
+    """).collect()
+
+def get_db_answer(user_prompt):
+    # Fetch table & column metadata
+    tables_df = session.sql("SELECT * FROM DB_TABLES_VIEW").to_pandas()
+    columns_df = session.sql("SELECT * FROM DB_COLUMNS_VIEW").to_pandas()
+
+    # Build prompt for LLM
     prompt = f"""
-Extract unique {entity_type} names from the text.
+You are a database assistant.
 
-Only return names where complete detailed information exists.
-Return comma separated list only.
-Do NOT invent any names. Only use what's present in the text.
+You have the following information:
 
-Text:
-{full_text}
+Tables:
+{tables_df.to_csv(index=False)}
+
+Columns:
+{columns_df.to_csv(index=False)}
+
+Answer the user question using ONLY this information.
+Segregate PII and PHI columns if applicable.
+Do NOT invent any tables or columns. If info not available, reply:
+'Information not found in database.'
+
+User Question:
+{user_prompt}
+
+Answer:
 """
-
-    response = call_llm(prompt)
-    names = [x.strip() for x in response.split(",") if len(x.strip()) > 2]
-    return list(set(names))
-
-# -----------------------------------------------------------------------------
-# Get Full Details
-# -----------------------------------------------------------------------------
-def get_full_details(name, entity_type):
-    df = fetch_all_chunks()
-    full_text = "\n".join(df["CHUNK_TEXT"].tolist())
-
-    prompt = f"""
-Provide complete detailed information about {entity_type} named {name}.
-Use ONLY the provided text.
-If insufficient data, return NOTHING.
-Do NOT make up any information or hallucinate details.
-
-Text:
-{full_text}
-"""
-
     return call_llm(prompt)
 
 # -----------------------------------------------------------------------------
@@ -196,93 +198,51 @@ st.sidebar.success("Authenticated")
 st.sidebar.write("User:", st.session_state.username)
 st.sidebar.write("Role:", st.session_state.app_role.upper())
 
+# Toggle between PDF / Database
+st.sidebar.markdown("---")
+st.session_state.mode = st.sidebar.radio(
+    "Select Mode",
+    ["PDF", "Database"]
+)
+
 if st.sidebar.button("Logout"):
     st.session_state.clear()
     st.rerun()
 
 # -----------------------------------------------------------------------------
-# ADMIN / OWNER ENTITY VIEW (ChatGPT Style)
+# MAIN CHAT
 # -----------------------------------------------------------------------------
-if st.session_state.app_role in ["admin", "owner"]:
-
-    st.sidebar.markdown("---")
-    sidebar_tab = st.sidebar.radio(
-        "Select Category",
-        ["Patients Details", "Doctor Details"]
-    )
-
-    if sidebar_tab == "Patients Details":
-        patient_names = extract_entities("patient")
-
-        for name in patient_names:
-            if st.sidebar.button(name, key=f"patient_{name}"):
-
-                details = get_full_details(name, "patient")
-
-                if details.strip():
-                    st.session_state.messages = []
-
-                    st.session_state.messages.append(
-                        {"role": "user", "content": f"tell me about {name}"}
-                    )
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": details}
-                    )
-
-    if sidebar_tab == "Doctor Details":
-        doctor_names = extract_entities("doctor")
-
-        for name in doctor_names:
-            if st.sidebar.button(name, key=f"doctor_{name}"):
-
-                details = get_full_details(name, "doctor")
-
-                if details.strip():
-                    st.session_state.messages = []
-
-                    st.session_state.messages.append(
-                        {"role": "user", "content": f"Show complete details of doctor {name}"}
-                    )
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": details}
-                    )
-
-# -----------------------------------------------------------------------------
-# MAIN CHAT APPLICATION
-# -----------------------------------------------------------------------------
-st.title("📄 PDF Chatbot on Snowflake")
+st.title("📄 PDF / Database Chatbot on Snowflake")
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
 
-prompt = st.chat_input("Ask about your PDFs")
+prompt = st.chat_input("Ask a question")
 
 if prompt:
-
     st.session_state.messages.append({"role": "user", "content": prompt})
 
     with st.chat_message("user"):
         st.write(prompt)
 
     with st.chat_message("assistant"):
-
-        with st.spinner("Searching documents..."):
-
+        with st.spinner("Processing..."):
             try:
-                chunks_df = call_search(prompt)
+                if st.session_state.mode == "PDF":
+                    chunks_df = call_search(prompt)
 
-                if chunks_df.empty:
-                    answer = "Information not found in documents."
-                else:
-                    context_text = "\n\n".join(
-                        [
-                            f"[File: {row.SOURCE_FILE} | Page: {row.PAGE_NUM}]\n{row.CHUNK_TEXT}"
-                            for _, row in chunks_df.iterrows()
-                        ]
-                    )
+                    if chunks_df.empty:
+                        answer = "Information not found in documents."
+                    else:
+                        context_text = "\n\n".join(
+                            [
+                                f"[File: {row.SOURCE_FILE} | Page: {row.PAGE_NUM}]\n{row.CHUNK_TEXT}"
+                                for _, row in chunks_df.iterrows()
+                            ]
+                        )
 
-                    full_prompt = f"""
+                        full_prompt = f"""
 Use ONLY context provided below.
 If answer cannot be found in context, reply exactly:
 "Information not found in documents."
@@ -296,20 +256,19 @@ Question:
 
 Answer:
 """
-                    answer = call_llm(full_prompt)
+                        answer = call_llm(full_prompt)
 
-                    if st.session_state.app_role not in ["admin", "owner"]:
-                        answer = mask_answer(answer)
+                        if st.session_state.app_role not in ["admin", "owner"]:
+                            answer = mask_answer(answer)
+
+                elif st.session_state.mode == "Database":
+                    create_db_metadata_views()
+                    answer = get_db_answer(prompt)
 
                 st.write(answer)
-
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": answer}
-                )
+                st.session_state.messages.append({"role": "assistant", "content": answer})
 
             except Exception as e:
                 error_msg = f"Error: {str(e)}"
                 st.error(error_msg)
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": error_msg}
-                )
+                st.session_state.messages.append({"role": "assistant", "content": error_msg})
