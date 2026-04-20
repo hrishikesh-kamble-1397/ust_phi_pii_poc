@@ -18,7 +18,7 @@ session = get_active_session()
 MODEL_NAME = "mistral-large2"
 EMBED_MODEL = "snowflake-arctic-embed-m"
 SIMILARITY_THRESHOLD = 0.35
-MAX_CHUNKS = 30
+MAX_CHUNKS = 50
 
 # -----------------------------------------------------------------------------
 # Session State
