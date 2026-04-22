@@ -15,7 +15,7 @@ session = get_active_session()
 # -----------------------------------------------------------------------------
 # Settings
 # -----------------------------------------------------------------------------
-MODEL_NAME = "mistral-large2"
+MODEL_NAME = "claude-3-5-sonnet"
 EMBED_MODEL = "snowflake-arctic-embed-m"
 SIMILARITY_THRESHOLD = 0.35
 MAX_CHUNKS = 50
@@ -121,49 +121,83 @@ def fetch_all_chunks():
 # -----------------------------------------------------------------------------
 # Database Functions
 # -----------------------------------------------------------------------------
-def create_db_metadata_views():
-    # Create temporary view for tables metadata
-    session.sql("""
-        CREATE OR REPLACE TEMPORARY VIEW DB_TABLES_VIEW AS
-        SELECT *
-        FROM INFORMATION_SCHEMA.TABLES
-    """).collect()
+def get_db_rows(user_prompt: str):
+    """
+    Fetch relevant rows from POC_EHR_NOTES_PHI_REDACTED_OPT
+    using a simple text search across key columns.
+    RBAC: admins/owners see raw EHR_NOTES, others see NOTES_REDACTED.
+    """
+    # Decide which notes column to expose based on app_role
+    notes_col = "EHR_NOTES" if st.session_state.app_role in ["admin", "owner"] else "NOTES_REDACTED"
 
-    # Create temporary view for columns metadata
-    session.sql("""
-        CREATE OR REPLACE TEMPORARY VIEW DB_COLUMNS_VIEW AS
-        SELECT *
-        FROM INFORMATION_SCHEMA.COLUMNS
-    """).collect()
+    sql = f"""
+        SELECT
+            PATIENT_ID,
+            PATIENT_NAME,
+            PATIENT_ADDRESS,
+            HP_DETAILS,
+            {notes_col} AS NOTES,
+            BATCH_ID,
+            ROW_IN_BATCH
+        FROM AI_POC_DB.PII_PHI_POC.POC_EHR_NOTES_PHI_REDACTED_OPT
+        WHERE
+            PATIENT_ID ILIKE '%' || :1 || '%'
+            OR PATIENT_NAME ILIKE '%' || :1 || '%'
+            OR PATIENT_ADDRESS ILIKE '%' || :1 || '%'
+            OR HP_DETAILS ILIKE '%' || :1 || '%'
+            OR EHR_NOTES ILIKE '%' || :1 || '%'
+    """
+    return session.sql(sql, params=[user_prompt]).to_pandas()
 
-def get_db_answer(user_prompt):
-    # Fetch table & column metadata
-    tables_df = session.sql("SELECT * FROM DB_TABLES_VIEW").to_pandas()
-    columns_df = session.sql("SELECT * FROM DB_COLUMNS_VIEW").to_pandas()
+def get_db_answer(user_prompt: str):
+    """
+    Build a context from matching rows and ask the LLM to answer
+    based only on those rows.
+    """
+    rows_df = get_db_rows(user_prompt)
 
-    # Build prompt for LLM
+    if rows_df.empty:
+        return "Information not found in database."
+
+    # Turn matching rows into a compact context block
+    # (you can tune which columns you include)
+    context_lines = []
+    for _, row in rows_df.iterrows():
+        line = (
+            f"PATIENT_ID: {row.PATIENT_ID} | "
+            f"NAME: {row.PATIENT_NAME} | "
+            f"ADDRESS: {row.PATIENT_ADDRESS} | "
+            f"HP_DETAILS: {row.HP_DETAILS} | "
+            f"NOTES: {row.NOTES} | "
+            f"BATCH_ID: {row.BATCH_ID} | "
+            f"ROW_IN_BATCH: {row.ROW_IN_BATCH}"
+        )
+        context_lines.append(line)
+
+    context_text = "\n".join(context_lines)
+
     prompt = f"""
-You are a database assistant.
+You are a clinical data assistant.
+Use ONLY the patient records provided in the context below.
+If the answer cannot be found in the context, reply exactly:
+"Information not found in database."
+Do NOT invent or hallucinate any details.
 
-You have the following information:
-
-Tables:
-{tables_df.to_csv(index=False)}
-
-Columns:
-{columns_df.to_csv(index=False)}
-
-Answer the user question using ONLY this information.
-Segregate PII and PHI columns if applicable.
-Do NOT invent any tables or columns. If info not available, reply:
-'Information not found in database.'
+Context (each line is one row from the table):
+{context_text}
 
 User Question:
 {user_prompt}
 
 Answer:
 """
-    return call_llm(prompt)
+    answer = call_llm(prompt)
+
+    # Apply the same RBAC masking rule as PDF mode
+    if st.session_state.app_role not in ["admin", "owner"]:
+        answer = mask_answer(answer)
+
+    return answer
 
 # -----------------------------------------------------------------------------
 # LOGIN SCREEN
@@ -261,9 +295,8 @@ Answer:
                         if st.session_state.app_role not in ["admin", "owner"]:
                             answer = mask_answer(answer)
 
-                elif st.session_state.mode == "Database":
-                    create_db_metadata_views()
-                    answer = get_db_answer(prompt)
+                        elif st.session_state.mode == "Database":
+                                answer = get_db_answer(prompt)
 
                 st.write(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
