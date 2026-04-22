@@ -136,9 +136,7 @@ def get_db_rows(user_prompt: str):
             PATIENT_NAME,
             PATIENT_ADDRESS,
             HP_DETAILS,
-            {notes_col} AS NOTES,
-            BATCH_ID,
-            ROW_IN_BATCH
+            {notes_col} AS NOTES
         FROM AI_POC_DB.PII_PHI_POC.POC_EHR_NOTES_PHI_REDACTED_OPT
         WHERE SEARCH(
             ({notes_col}, HP_DETAILS),
@@ -168,9 +166,7 @@ def get_db_answer(user_prompt: str):
             f"NAME: {row.PATIENT_NAME} | "
             f"ADDRESS: {row.PATIENT_ADDRESS} | "
             f"HP_DETAILS: {row.HP_DETAILS} | "
-            f"NOTES: {row.NOTES} | "
-            f"BATCH_ID: {row.BATCH_ID} | "
-            f"ROW_IN_BATCH: {row.ROW_IN_BATCH}"
+            f"NOTES: {row.NOTES}"
         )
         context_lines.append(line)
 
