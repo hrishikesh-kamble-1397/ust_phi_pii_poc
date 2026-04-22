@@ -295,8 +295,8 @@ Answer:
                         if st.session_state.app_role not in ["admin", "owner"]:
                             answer = mask_answer(answer)
 
-                        elif st.session_state.mode == "Database":
-                                answer = get_db_answer(prompt)
+                       elif st.session_state.mode == "Database":
+                             answer = get_db_answer(prompt)
 
                 st.write(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
