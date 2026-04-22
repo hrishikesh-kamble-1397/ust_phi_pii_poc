@@ -141,9 +141,9 @@ def get_db_rows(user_prompt: str):
             ROW_IN_BATCH
         FROM AI_POC_DB.PII_PHI_POC.POC_EHR_NOTES_PHI_REDACTED_OPT
         WHERE SEARCH(
-            (PATIENT_ID, PATIENT_NAME, PATIENT_ADDRESS, HP_DETAILS, {notes_col}),
+            ({notes_col}, HP_DETAILS),
             :1,
-            SEARCH_MODE => 'PHRASE'
+            SEARCH_MODE => 'OR'
         )
         LIMIT 50
     """
@@ -155,8 +155,6 @@ def get_db_answer(user_prompt: str):
     based only on those rows.
     """
     rows_df = get_db_rows(user_prompt)
-
-    st.write("DEBUG rows_df shape:", rows_df.shape)  # TEMP
 
     if rows_df.empty:
         return "Information not found in database."
