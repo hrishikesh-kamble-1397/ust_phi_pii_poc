@@ -15,7 +15,7 @@ session = get_active_session()
 # -----------------------------------------------------------------------------
 # Settings
 # -----------------------------------------------------------------------------
-MODEL_NAME = "claude-3-5-sonnet"
+MODEL_NAME = "mistral-large2"
 EMBED_MODEL = "snowflake-arctic-embed-m"
 SIMILARITY_THRESHOLD = 0.35
 MAX_CHUNKS = 50
