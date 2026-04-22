@@ -140,12 +140,12 @@ def get_db_rows(user_prompt: str):
             BATCH_ID,
             ROW_IN_BATCH
         FROM AI_POC_DB.PII_PHI_POC.POC_EHR_NOTES_PHI_REDACTED_OPT
-        WHERE
-            PATIENT_ID ILIKE '%' || :1 || '%'
-            OR PATIENT_NAME ILIKE '%' || :1 || '%'
-            OR PATIENT_ADDRESS ILIKE '%' || :1 || '%'
-            OR HP_DETAILS ILIKE '%' || :1 || '%'
-            OR EHR_NOTES ILIKE '%' || :1 || '%'
+        WHERE SEARCH(
+            (PATIENT_ID, PATIENT_NAME, PATIENT_ADDRESS, HP_DETAILS, {notes_col}),
+            :1,
+            SEARCH_MODE => 'PHRASE'
+        )
+        LIMIT 50
     """
     return session.sql(sql, params=[user_prompt]).to_pandas()
 
