@@ -156,6 +156,8 @@ def get_db_answer(user_prompt: str):
     """
     rows_df = get_db_rows(user_prompt)
 
+    st.write("DEBUG rows_df shape:", rows_df.shape)  # TEMP
+
     if rows_df.empty:
         return "Information not found in database."
 
