@@ -129,8 +129,8 @@ def get_db_rows(user_prompt: str):
     """
     # Decide which notes column to expose based on app_role
     notes_col = "EHR_NOTES" if st.session_state.app_role in ["admin", "owner"] else "NOTES_REDACTED"
-    
-     sql = f"""
+
+    sql = f"""
         SELECT
             PATIENT_ID,
             PATIENT_NAME,
