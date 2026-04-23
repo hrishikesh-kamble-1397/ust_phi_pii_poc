@@ -129,23 +129,38 @@ def get_db_rows(user_prompt: str):
     """
     # Decide which notes column to expose based on app_role
     notes_col = "EHR_NOTES" if st.session_state.app_role in ["admin", "owner"] else "NOTES_REDACTED"
-
-    sql = f"""
+    
+    sql_semantic = f"""
+        WITH query_vec AS (
+            SELECT SNOWFLAKE.CORTEX.EMBED_TEXT_768('{EMBED_MODEL}', :1) AS emb
+        ),
+        scored AS (
+            SELECT
+                PATIENT_ID,
+                PATIENT_NAME,
+                PATIENT_ADDRESS,
+                HP_DETAILS,
+                {notes_col} AS NOTES,
+                BATCH_ID,
+                ROW_IN_BATCH,
+                VECTOR_COSINE_SIMILARITY(NOTES_EMB, q.emb) AS SCORE
+            FROM AI_POC_DB.PII_PHI_POC.POC_EHR_NOTES_PHI_REDACTED_OPT t
+            CROSS JOIN query_vec q
+        )
         SELECT
             PATIENT_ID,
             PATIENT_NAME,
             PATIENT_ADDRESS,
             HP_DETAILS,
-            {notes_col} AS NOTES
-        FROM AI_POC_DB.PII_PHI_POC.POC_EHR_NOTES_PHI_REDACTED_OPT
-        WHERE SEARCH(
-            ({notes_col}, HP_DETAILS),
-            :1,
-            SEARCH_MODE => 'OR'
-        )
+            NOTES,
+            BATCH_ID,
+            ROW_IN_BATCH
+        FROM scored
+        WHERE SCORE >= 0.30
+        ORDER BY SCORE DESC
         LIMIT 50
     """
-    return session.sql(sql, params=[user_prompt]).to_pandas()
+    return session.sql(sql_semantic, params=[user_prompt]).to_pandas()
 
 def get_db_answer(user_prompt: str):
     """
