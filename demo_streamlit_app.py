@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
+import os
 from snowflake.snowpark.context import get_active_session
+from anthropic import Anthropic
 
 # -----------------------------------------------------------------------------
 # App Configuration
@@ -11,6 +13,12 @@ st.set_page_config(page_title="PDF/Database Chatbot", page_icon="📄", layout="
 # Snowflake Session
 # -----------------------------------------------------------------------------
 session = get_active_session()
+
+# -----------------------------------------------------------------------------
+# Claude Setup
+# -----------------------------------------------------------------------------
+claude_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+CLAUDE_MODEL = "claude-3-7-sonnet-20250219"
 
 # -----------------------------------------------------------------------------
 # Settings
@@ -61,7 +69,7 @@ def authenticate_user(user_name, password):
     return df.iloc[0]["APP_ROLE"].lower()
 
 # -----------------------------------------------------------------------------
-# LLM Call
+# Cortex LLM (used for PDF + masking)
 # -----------------------------------------------------------------------------
 def call_llm(prompt):
     sql = """ SELECT SNOWFLAKE.CORTEX.COMPLETE(?, ?) AS ANSWER """
@@ -69,14 +77,26 @@ def call_llm(prompt):
     return result[0]["ANSWER"]
 
 # -----------------------------------------------------------------------------
-# Masking (for PDF mode)
+# Claude Call
+# -----------------------------------------------------------------------------
+def call_claude(prompt):
+    response = claude_client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=800,
+        temperature=0,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.content[0].text
+
+# -----------------------------------------------------------------------------
+# Masking (for non-admin)
 # -----------------------------------------------------------------------------
 def mask_answer(answer_text):
     masking_prompt = f"""
 Mask ALL PII and PHI.
 Replace sensitive values with: XXXXXX
 Return only masked text.
-Do NOT invent or add any new information. Only mask what's present.
+Do NOT add new information.
 
 Text:
 {answer_text}
@@ -84,7 +104,7 @@ Text:
     return call_llm(masking_prompt)
 
 # -----------------------------------------------------------------------------
-# PDF Functions
+# PDF Functions (UNCHANGED)
 # -----------------------------------------------------------------------------
 def call_search(query):
     search_sql = f"""
@@ -112,143 +132,137 @@ def call_search(query):
     """
     return session.sql(search_sql, params=[query]).to_pandas()
 
-def fetch_all_chunks():
-    return session.sql("""
-        SELECT CHUNK_TEXT
-        FROM AI_POC_DB.PII_PHI_POC.DOCS_CHUNKS_NEW
-    """).to_pandas()
-
 # -----------------------------------------------------------------------------
-# Database Functions
+# DATABASE FUNCTIONS (FIXED + BATCH OPTIMIZED)
 # -----------------------------------------------------------------------------
-def get_db_rows(user_prompt: str):
-    """
-    Fetch relevant rows from POC_EHR_NOTES_PHI_REDACTED_OPT
-    using a simple text search across key columns.
-    RBAC: admins/owners see raw EHR_NOTES, others see NOTES_REDACTED.
-    """
-    # Decide which notes column to expose based on app_role
+def get_relevant_batches(user_prompt):
     notes_col = "EHR_NOTES" if st.session_state.app_role in ["admin", "owner"] else "NOTES_REDACTED"
 
     sql = f"""
-        SELECT
-            PATIENT_ID,
-            PATIENT_NAME,
-            PATIENT_ADDRESS,
-            HP_DETAILS,
-            {notes_col} AS NOTES
+        SELECT BATCH_ID, COUNT(*) AS CNT
         FROM AI_POC_DB.PII_PHI_POC.POC_EHR_NOTES_PHI_REDACTED_OPT
-        WHERE SEARCH(
-            ({notes_col}, HP_DETAILS),
-            :1,
-            SEARCH_MODE => 'OR'
-        )
-        LIMIT 50
+        WHERE SEARCH(({notes_col}, HP_DETAILS), :1, SEARCH_MODE => 'OR')
+        GROUP BY BATCH_ID
+        ORDER BY CNT DESC
+        LIMIT 5
     """
+
     return session.sql(sql, params=[user_prompt]).to_pandas()
 
-def get_db_answer(user_prompt: str):
+
+def get_batch_data(batch_ids):
+    notes_col = "EHR_NOTES" if st.session_state.app_role in ["admin", "owner"] else "NOTES_REDACTED"
+
+    batch_list = ",".join([str(x) for x in batch_ids])
+
+    sql = f"""
+        SELECT
+            BATCH_ID,
+            LISTAGG(
+                'PatientID: ' || PATIENT_ID ||
+                ' | Name: ' || PATIENT_NAME ||
+                ' | Details: ' || HP_DETAILS ||
+                ' | Notes: ' || {notes_col},
+                '\n---\n'
+            ) AS BATCH_TEXT
+        FROM AI_POC_DB.PII_PHI_POC.POC_EHR_NOTES_PHI_REDACTED_OPT
+        WHERE BATCH_ID IN ({batch_list})
+        GROUP BY BATCH_ID
     """
-    Build a context from matching rows and ask the LLM to answer
-    based only on those rows.
-    """
-    rows_df = get_db_rows(user_prompt)
 
-    if rows_df.empty:
-        return "Information not found in database."
+    return session.sql(sql).to_pandas()
 
-    # Turn matching rows into a compact context block
-    # (you can tune which columns you include)
-    context_lines = []
-    for _, row in rows_df.iterrows():
-        line = (
-            f"PATIENT_ID: {row.PATIENT_ID} | "
-            f"NAME: {row.PATIENT_NAME} | "
-            f"ADDRESS: {row.PATIENT_ADDRESS} | "
-            f"HP_DETAILS: {row.HP_DETAILS} | "
-            f"NOTES: {row.NOTES}"
-        )
-        context_lines.append(line)
 
-    context_text = "\n".join(context_lines)
+def build_prompt(user_prompt, batch_df):
+    context = ""
+    for _, row in batch_df.iterrows():
+        context += f"\n===== BATCH {row['BATCH_ID']} =====\n{row['BATCH_TEXT']}\n"
 
-    prompt = f"""
+    return f"""
 You are a clinical data assistant.
-Use ONLY the patient records provided in the context below.
-If the answer cannot be found in the context, reply exactly:
+
+Use ONLY context below.
+If answer not found, reply exactly:
 "Information not found in database."
-Do NOT invent or hallucinate any details.
 
-Context (each line is one row from the table):
-{context_text}
+Context:
+{context}
 
-User Question:
+Question:
 {user_prompt}
 
 Answer:
 """
-    answer = call_llm(prompt)
 
-    # Apply the same RBAC masking rule as PDF mode
+
+def get_db_answer(user_prompt):
+    batch_df = get_relevant_batches(user_prompt)
+
+    if batch_df.empty:
+        return "Information not found in database."
+
+    batch_ids = batch_df["BATCH_ID"].tolist()
+    data_df = get_batch_data(batch_ids)
+
+    if data_df.empty:
+        return "Information not found in database."
+
+    prompt = build_prompt(user_prompt, data_df)
+
+    answer = call_claude(prompt)
+
     if st.session_state.app_role not in ["admin", "owner"]:
         answer = mask_answer(answer)
 
     return answer
 
 # -----------------------------------------------------------------------------
-# LOGIN SCREEN
+# LOGIN
 # -----------------------------------------------------------------------------
 if not st.session_state.authenticated:
-
     st.title("🔐 Chatbot Login")
 
     with st.form("login_form"):
-        login_user = st.text_input("Username", placeholder="e.g. Vedant")
-        login_password = st.text_input("Password", type="password")
-        login_btn = st.form_submit_button("Login")
+        user = st.text_input("Username")
+        pwd = st.text_input("Password", type="password")
+        btn = st.form_submit_button("Login")
 
-    if login_btn:
-        role = authenticate_user(login_user, login_password)
-
+    if btn:
+        role = authenticate_user(user, pwd)
         if not role:
             st.error("Invalid credentials")
             st.stop()
 
         st.session_state.authenticated = True
-        st.session_state.username = login_user
+        st.session_state.username = user
         st.session_state.app_role = role
         st.rerun()
 
     st.stop()
 
 # -----------------------------------------------------------------------------
-# Sidebar
+# SIDEBAR
 # -----------------------------------------------------------------------------
 st.sidebar.success("Authenticated")
 st.sidebar.write("User:", st.session_state.username)
 st.sidebar.write("Role:", st.session_state.app_role.upper())
 
-# Toggle between PDF / Database
-st.sidebar.markdown("---")
-st.session_state.mode = st.sidebar.radio(
-    "Select Mode",
-    ["PDF", "Database"]
-)
+st.session_state.mode = st.sidebar.radio("Mode", ["PDF", "Database"])
 
 if st.sidebar.button("Logout"):
     st.session_state.clear()
     st.rerun()
 
 # -----------------------------------------------------------------------------
-# MAIN CHAT
+# CHAT UI
 # -----------------------------------------------------------------------------
-st.title("📄 PDF / Database Chatbot on Snowflake")
+st.title("📄 PDF / Database Chatbot")
 
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
 
-prompt = st.chat_input("Ask a question")
+prompt = st.chat_input("Ask something")
 
 if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -265,42 +279,30 @@ if prompt:
                     if chunks_df.empty:
                         answer = "Information not found in documents."
                     else:
-                        context_text = "\n\n".join(
-                            [
-                                f"[File: {row.SOURCE_FILE} | Page: {row.PAGE_NUM}]\n{row.CHUNK_TEXT}"
-                                for _, row in chunks_df.iterrows()
-                            ]
+                        context = "\n\n".join(
+                            [row.CHUNK_TEXT for _, row in chunks_df.iterrows()]
                         )
 
-                        full_prompt = f"""
-Use ONLY context provided below.
-If answer cannot be found in context, reply exactly:
-"Information not found in documents."
-Do NOT invent or hallucinate any details.
+                        answer = call_llm(f"""
+Use ONLY context below.
 
 Context:
-{context_text}
+{context}
 
 Question:
 {prompt}
 
 Answer:
-"""
-                        answer = call_llm(full_prompt)
+""")
 
                         if st.session_state.app_role not in ["admin", "owner"]:
                             answer = mask_answer(answer)
 
-                elif st.session_state.mode == "Database":
-                    answer = get_db_answer(prompt)
-
                 else:
-                    answer = "Invalid mode selected."
+                    answer = get_db_answer(prompt)
 
                 st.write(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
 
             except Exception as e:
-                error_msg = f"Error: {str(e)}"
-                st.error(error_msg)
-                st.session_state.messages.append({"role": "assistant", "content": error_msg})
+                st.error(str(e))
