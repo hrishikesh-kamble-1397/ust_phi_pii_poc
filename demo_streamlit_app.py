@@ -122,14 +122,19 @@ def fetch_all_chunks():
 # Database Functions
 # -----------------------------------------------------------------------------
 def get_db_rows(user_prompt: str):
-    """
-    Fetch relevant rows from POC_EHR_NOTES_PHI_REDACTED_OPT
-    using a simple text search across key columns.
-    RBAC: admins/owners see raw EHR_NOTES, others see NOTES_REDACTED.
-    """
-    # Decide which notes column to expose based on app_role
     notes_col = "EHR_NOTES" if st.session_state.app_role in ["admin", "owner"] else "NOTES_REDACTED"
 
+    # Step 1: Extract search keywords from the user prompt via LLM
+    keyword_prompt = f"""
+Extract 3-5 short medical search keywords from this question.
+Return ONLY the keywords separated by spaces, nothing else.
+
+Question: {user_prompt}
+
+Keywords:"""
+    keywords = call_llm(keyword_prompt).strip()
+
+    # Step 2: Try SEARCH with extracted keywords
     sql = f"""
         SELECT
             PATIENT_ID,
@@ -145,7 +150,23 @@ def get_db_rows(user_prompt: str):
         )
         LIMIT 50
     """
-    return session.sql(sql, params=[user_prompt]).to_pandas()
+    df = session.sql(sql, params=[keywords]).to_pandas()
+
+    # Step 3: If SEARCH returns too few rows, fall back to a broader sample
+    if len(df) < 5:
+        fallback_sql = f"""
+            SELECT
+                PATIENT_ID,
+                PATIENT_NAME,
+                PATIENT_ADDRESS,
+                HP_DETAILS,
+                {notes_col} AS NOTES
+            FROM AI_POC_DB.PII_PHI_POC.POC_EHR_NOTES_PHI_REDACTED_OPT
+            LIMIT 50
+        """
+        df = session.sql(fallback_sql).to_pandas()
+
+    return df
 
 def get_db_answer(user_prompt: str):
     """
